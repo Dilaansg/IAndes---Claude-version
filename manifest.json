@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "IAndes",
+  "version": "3.0",
+  "description": "Reduce la huella hídrica y de carbono de tus chats con IA. Comprime y mejora prompts localmente.",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "*://chat.openai.com/*",
+    "*://chatgpt.com/*",
+    "*://claude.ai/*",
+    "*://gemini.google.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*",
+        "*://claude.ai/*",
+        "*://gemini.google.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "IAndes – Comprime tu prompt"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/ort.min.js","token_worker.js"],
+      "matches":   ["<all_urls>"]
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

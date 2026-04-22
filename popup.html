@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<!--
+  =============================================================================
+  IAndes – Popup de la extensión v3.0
+  =============================================================================
+
+  ¿Qué es este archivo?
+    Es la interfaz gráfica que aparece cuando haces clic en el ícono de
+    la extensión en la barra del navegador.
+
+    Muestra:
+      1. En qué chat estás (ChatGPT, Claude, Gemini)
+      2. Las métricas del último prompt analizado
+         (tokens, agua, CO2)
+      3. Estado del sistema (¿tiktoken disponible? ¿Ollama corriendo?)
+      4. Resumen de la sesión (tokens ahorrados)
+      5. Banner con instrucciones si Ollama no está disponible
+
+  ¿Cómo funciona?
+    1. Al abrirse, llama al Service Worker (background.js) para conocer
+       el estado del sistema (Ollama, ONNX).
+    2. También consulta al Content Script (content.js) para obtener las
+       métricas del prompt actual en la pestaña activa.
+    3. Refresca las métricas cada 2 segundos.
+  =============================================================================
+-->
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IAndes</title>
+<style>
+  /* ---- Variables de color y tipografía ---- */
+  :root {
+    --bg:        #0b0f1a;       /* Fondo principal oscuro */
+    --surface:   #131929;       /* Fondo de las tarjetas */
+    --border:    rgba(0,230,150,0.18);
+    --accent:    #00e696;       /* Verde IAndes */
+    --accent2:   #00b4d8;       /* Azul agua */
+    --text:      #dff5e8;
+    --muted:     #6b8a78;       /* Texto secundario */
+    --red:       #ff4d6d;
+    --warning:   #ffb347;
+    --radius:    10px;
+    --mono:      'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    width: 300px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 16px;
+  }
+
+  /* ---- Cabecera ---- */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .logo    { font-size: 20px; font-weight: 800; color: var(--accent); letter-spacing: -0.03em; }
+  .version { font-size: 9px; color: var(--muted); margin-top: 2px; }
+
+  /* ---- Indicador del proveedor activo ---- */
+  .provider-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(0,230,150,0.1);
+    border: 1px solid rgba(0,230,150,0.25);
+    border-radius: 20px;
+    padding: 3px 10px;
+    font-size: 10px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  /* ---- Selector de modo (Comprimir / Mejorar) ---- */
+  .mode-selector { display: flex; gap: 6px; margin-bottom: 14px; }
+  .mode-btn {
+    flex: 1;
+    padding: 7px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.18s;
+    text-align: center;
+  }
+  .mode-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,230,150,0.07);
+  }
+  .mode-btn:hover:not(.active) { border-color: rgba(0,230,150,0.35); color: var(--text); }
+
+  /* ---- Tarjetas ---- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .card-title {
+    font-size: 9px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+
+  /* ---- Filas de métricas ---- */
+  .metric-row { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 0; }
+  .metric-label { color: var(--muted); }
+  .metric-value { color: var(--text); font-weight: 600; }
+  .metric-value.accent { color: var(--accent); }
+  .metric-value.water  { color: var(--accent2); }
+  .metric-value.co2    { color: #7bff9e; }
+
+  /* ---- Indicadores de estado (puntos de colores) ---- */
+  .status-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok      { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .dot.warn    { background: var(--warning); }
+  .dot.error   { background: var(--red); }
+  .dot.loading { background: var(--muted); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* ---- Banner de instalación de Ollama ---- */
+  .banner {
+    background: rgba(255,179,71,0.08);
+    border: 1px solid rgba(255,179,71,0.3);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    display: none;   /* Oculto por defecto, se muestra si Ollama no está */
+  }
+  .banner.visible  { display: block; }
+  .banner-title    { color: var(--warning); font-weight: 700; font-size: 11px; margin-bottom: 4px; }
+  .banner-text     { color: #c9a06a; font-size: 10px; line-height: 1.5; }
+  .banner-cmd {
+    background: rgba(0,0,0,0.4);
+    border-radius: 5px;
+    padding: 5px 8px;
+    margin: 6px 0;
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: background 0.15s;
+  }
+  .banner-cmd:hover { background: rgba(255,255,255,0.06); }
+  .copy-hint { font-size: 9px; color: var(--muted); }
+
+  /* ---- Resumen de sesión ---- */
+  .session-bar { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 8px; }
+  .session-title { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 5px; }
+  .progress-track { height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; margin: 6px 0 4px; }
+  .progress-fill  { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; transition: width 0.5s ease; }
+  .progress-label { font-size: 9px; color: var(--muted); }
+
+  /* ---- Nota sobre API keys ---- */
+  .api-note {
+    background: rgba(0,180,216,0.07);
+    border: 1px solid rgba(0,180,216,0.2);
+    border-radius: 8px;
+    padding: 7px 10px;
+    margin-bottom: 8px;
+    font-size: 9px;
+    color: #7bcfe8;
+    line-height: 1.5;
+    display: none;
+  }
+  .api-note.visible { display: block; }
+
+  /* ---- Pie de página ---- */
+  .footer { text-align: center; color: var(--muted); font-size: 9px; margin-top: 4px; opacity: 0.6; }
+</style>
+</head>
+<body>
+
+<!-- Cabecera con nombre y versión -->
+<div class="header">
+  <div>
+    <div class="logo">IAndes</div>
+    <div class="version">v3.0 · Extensión de Chrome</div>
+  </div>
+</div>
+
+<!-- Badge que muestra en qué chat está el usuario -->
+<div class="provider-badge">
+  <span>●</span>
+  <span id="provider-name">Detectando…</span>
+</div>
+
+<!-- Selector de modo: Comprimir o Mejorar -->
+<div class="mode-selector">
+  <button class="mode-btn active" id="btn-compress">⬇ Comprimir</button>
+  <button class="mode-btn"        id="btn-improve" >✦ Mejorar</button>
+</div>
+
+<!-- Tarjeta: métricas del prompt actual -->
+<div class="card">
+  <div class="card-title">Prompt actual</div>
+  <div class="metric-row">
+    <span class="metric-label">🔢 Tokens</span>
+    <span class="metric-value accent" id="val-tokens">–</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-label">💧 Agua estimada</span>
+    <span class="metric-value water" id="val-water">–</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-label">🌿 CO₂ estimado</span>
+    <span class="metric-value co2" id="val-co2">–</span>
+  </div>
+  <div class="metric-row">
+    <span class="metric-label" style="font-size:9px;opacity:0.6;">Fuente</span>
+    <span style="font-size:9px;opacity:0.5;" id="val-source">–</span>
+  </div>
+</div>
+
+<!-- Nota sobre API keys (visible si el proveedor requiere key y no la tiene) -->
+<div class="api-note" id="api-note">
+  ℹ Para conteo exacto en este chat, configura tu API key como variable de entorno
+  y reinicia el servidor local.
+</div>
+
+<!-- Tarjeta: estado del sistema -->
+<div class="card">
+  <div class="card-title">Sistema</div>
+  <div class="status-row">
+    <div class="dot loading" id="dot-onnx"></div>
+    <span id="label-onnx">Verificando modelo ONNX…</span>
+  </div>
+  <div class="status-row">
+    <div class="dot loading" id="dot-ollama"></div>
+    <span id="label-ollama">Verificando Ollama…</span>
+  </div>
+  <div class="status-row">
+    <div class="dot loading" id="dot-server"></div>
+    <span id="label-server">Verificando servidor local…</span>
+  </div>
+</div>
+
+<!-- Banner: instrucciones para instalar Ollama (solo visible si no está disponible) -->
+<div class="banner" id="banner-ollama">
+  <div class="banner-title">Modo básico activo</div>
+  <div class="banner-text">
+    Para activar la compresión avanzada (Capa 3), instala Ollama y descarga el modelo recomendado:
+  </div>
+  <div class="banner-cmd" id="copy-cmd">
+    <span>ollama pull qwen2.5:3b</span>
+    <span class="copy-hint" id="copy-hint">📋 Copiar</span>
+  </div>
+  <div class="banner-text" style="margin-top:2px;">
+    <a id="link-ollama" href="https://ollama.com" target="_blank"
+       style="color:var(--warning);text-decoration:none;">
+      ¿Cómo instalar Ollama? →
+    </a>
+  </div>
+</div>
+
+<!-- Resumen de la sesión actual -->
+<div class="session-bar">
+  <div class="session-title">Esta sesión</div>
+  <div class="metric-row">
+    <span class="metric-label">Tokens ahorrados</span>
+    <span class="metric-value accent" id="session-tokens">0</span>
+  </div>
+  <div class="progress-track">
+    <div class="progress-fill" id="session-progress" style="width:0%"></div>
+  </div>
+  <div class="progress-label" id="session-label">0% de reducción promedio</div>
+</div>
+
+<div class="footer">Todo el procesamiento es local · Sin telemetría</div>
+
+<script>
+// =============================================================================
+// LÓGICA DEL POPUP
+// =============================================================================
+
+/**
+ * Estado del popup.
+ * Se inicializa con los valores guardados en chrome.storage.
+ */
+let currentMode = "compress";
+
+// ---------------------------------------------------------------------------
+// Selector de modo
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-compress").addEventListener("click", () => setMode("compress"));
+document.getElementById("btn-improve" ).addEventListener("click", () => setMode("improve"));
+
+function setMode(mode) {
+    currentMode = mode;
+    document.getElementById("btn-compress").classList.toggle("active", mode === "compress");
+    document.getElementById("btn-improve" ).classList.toggle("active", mode === "improve");
+
+    // Notificar al Service Worker del cambio de modo
+    chrome.runtime.sendMessage({ type: "SET_MODE", mode });
+}
+
+// Recuperar el modo guardado al abrir el popup
+chrome.storage.local.get("mode", ({ mode }) => {
+    if (mode) setMode(mode);
+});
+
+// ---------------------------------------------------------------------------
+// Copiar el comando de Ollama
+// ---------------------------------------------------------------------------
+
+document.getElementById("copy-cmd").addEventListener("click", () => {
+    navigator.clipboard.writeText("ollama pull qwen2.5:3b").then(() => {
+        document.getElementById("copy-hint").textContent = "✓ Copiado";
+        setTimeout(() => {
+            document.getElementById("copy-hint").textContent = "📋 Copiar";
+        }, 1800);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Detectar el proveedor de la pestaña activa y mostrar el badge
+// ---------------------------------------------------------------------------
+
+async function updateProviderBadge() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url) return;
+
+    const url = tab.url;
+    let name  = "Chat desconocido";
+    let color = "var(--muted)";
+
+    if (url.includes("chat.openai.com") || url.includes("chatgpt.com")) {
+        name = "ChatGPT"; color = "#10a37f";
+    } else if (url.includes("claude.ai")) {
+        name = "Claude";  color = "#d97706";
+    } else if (url.includes("gemini.google.com")) {
+        name = "Gemini";  color = "#4285f4";
+    }
+
+    const badge = document.getElementById("provider-name");
+    badge.textContent = name;
+    badge.closest(".provider-badge").style.color = color;
+    badge.closest(".provider-badge").style.borderColor = color + "44";
+    badge.closest(".provider-badge").style.background   = color + "18";
+}
+
+// ---------------------------------------------------------------------------
+// Obtener métricas del prompt activo desde el Content Script
+// ---------------------------------------------------------------------------
+
+async function refreshMetrics() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return;
+
+    // Pedir las métricas al Content Script que está corriendo en esa pestaña
+    chrome.tabs.sendMessage(tab.id, { type: "GET_METRICS" }, (data) => {
+        if (chrome.runtime.lastError || !data) return;
+
+        if (data.tokens   != null) document.getElementById("val-tokens").textContent = data.tokens + " tok";
+        if (data.water_ml != null) document.getElementById("val-water" ).textContent = data.water_ml + " ml";
+        if (data.co2_g    != null) document.getElementById("val-co2"   ).textContent = data.co2_g + " g";
+
+        // Mostrar la fuente del conteo (tiktoken, API de Anthropic, etc.)
+        const sourceEl = document.getElementById("val-source");
+        if (data.source)   sourceEl.textContent = data.source;
+        if (data.provider) sourceEl.textContent += ` (${data.provider})`;
+
+        // Mostrar nota de API key si el conteo es heurístico
+        const apiNote = document.getElementById("api-note");
+        if (data.source && data.source.includes("heuristic_no_key")) {
+            apiNote.classList.add("visible");
+        } else {
+            apiNote.classList.remove("visible");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Verificar el estado del sistema (desde el Service Worker)
+// ---------------------------------------------------------------------------
+
+async function refreshSystemStatus() {
+    // Verificar si el servidor local (Python) está disponible
+    try {
+        const resp = await fetch("http://127.0.0.1:5000/health", { signal: AbortSignal.timeout(2000) });
+        const data = await resp.json();
+
+        document.getElementById("dot-server"  ).className = "dot ok";
+        document.getElementById("label-server").textContent = `Servidor local OK (v${data.version})`;
+    } catch {
+        document.getElementById("dot-server"  ).className = "dot error";
+        document.getElementById("label-server").textContent = "Servidor local apagado";
+    }
+
+    // Verificar Ollama y modelo ONNX desde el Service Worker
+    chrome.runtime.sendMessage({ type: "GET_STATUS" }, (status) => {
+        if (chrome.runtime.lastError || !status) return;
+
+        // ONNX
+        const dotOnnx  = document.getElementById("dot-onnx");
+        const lblOnnx  = document.getElementById("label-onnx");
+        if (status.onnxCached) {
+            dotOnnx.className  = "dot ok";
+            lblOnnx.textContent = "Modelo ONNX en caché ✓";
+        } else {
+            dotOnnx.className  = "dot warn";
+            lblOnnx.textContent = "Modelo ONNX no descargado";
+        }
+
+        // Ollama
+        const dotOllama = document.getElementById("dot-ollama");
+        const lblOllama = document.getElementById("label-ollama");
+        const banner    = document.getElementById("banner-ollama");
+
+        if (status.ollamaAvailable && status.ollamaModel) {
+            dotOllama.className  = "dot ok";
+            lblOllama.textContent = `Ollama: ${status.ollamaModel} ✓`;
+            banner.classList.remove("visible");  // Ocultar el banner
+        } else {
+            dotOllama.className  = "dot warn";
+            lblOllama.textContent = "Ollama no detectado";
+            banner.classList.add("visible");     // Mostrar el banner con instrucciones
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Inicialización
+// ---------------------------------------------------------------------------
+
+// Al abrir el popup, cargar todo inmediatamente
+updateProviderBadge();
+refreshMetrics();
+refreshSystemStatus();
+
+// Refrescar métricas cada 2 segundos (el usuario puede estar escribiendo)
+setInterval(refreshMetrics, 2000);
+</script>
+
+</body>
+</html>
