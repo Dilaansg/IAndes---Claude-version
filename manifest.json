@@ -14,7 +14,9 @@
     "*://chat.openai.com/*",
     "*://chatgpt.com/*",
     "*://claude.ai/*",
-    "*://gemini.google.com/*"
+    "*://gemini.google.com/*",
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
   ],
 
   "background": {

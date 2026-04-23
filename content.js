@@ -9,8 +9,7 @@
  *
  *   1. DETECTAR en qué chat estás (ChatGPT, Claude, Gemini)
  *   2. ESCUCHAR lo que escribes en el campo de texto
- *   3. ENVIAR el texto al servidor local (contar_tokens_server.py) para
- *      obtener el conteo preciso Y el impacto ambiental
+ *   3. CALCULAR estimaciones locales de tokens e impacto ambiental
  *   4. MOSTRAR un pequeño overlay (cuadrito) con las métricas
  *   5. EJECUTAR la Capa 0 y Capa 1 del pipeline de compresión localmente
  *   6. DELEGAR las Capas 2 y 3 al Service Worker (background.js)
@@ -65,65 +64,108 @@ console.log(`[IAndes] Proveedor detectado: ${PROVIDER.name} (${PROVIDER.id})`);
 
 const CONFIG = {
     debounceMs:      1500,    // Esperar 1.5s después de que el usuario deja de escribir
-    serverUrl:       "http://127.0.0.1:5000",
-    serverTimeoutMs: 3000,    // Si el servidor no responde en 3s, usar estimación local
     overlayId:       "iandes-overlay",
+    // Si true: usar SOLO la heurística local; no intentar Worker ni Service Worker
+    // MODIFICADO: cambiar a false para habilitar Web Worker y Service Worker
+    localOnlyMode:    false,
 };
+
+const IMPROVE_REVIEW_ID = "iandes-improve-review";
 
 // Variable global que guarda el último texto del campo de prompt
 let textoTemporal = "";
+let lastProcessedPrompt = "";
+let lastProcessedAt = 0;
+let suppressNextScheduledProcess = false;
 
 // ---------------------------------------------------------------------------
 // WEB WORKER: conteo de tokens (tiktoken en worker o heurística)
 // ---------------------------------------------------------------------------
+// [FIX-CSP] Variables globales del worker
 let tokenWorker = null;
 let workerReady = false;
 const workerPending = new Map();
 let workerReqId = 1;
+let tokenWorkerErrorReason = null;
 
-(async function initTokenWorker() {
-    const workerUrl = chrome.runtime.getURL('token_worker.js');
-    try {
-        // Intento directo (funciona en la mayoría de navegadores).
-        // Evitamos el fallback fetch+Blob porque muchos CSP bloquean blob: y scripts inline.
-        tokenWorker = new Worker(workerUrl);
-    } catch (e) {
-        console.warn('[IAndes] No se pudo crear token worker (posible CSP):', e);
-        tokenWorker = null;
+// [FIX-CSP] Inicialización del worker usando Blob URL para evitar CSP
+async function initTokenWorker() {
+    if (CONFIG.localOnlyMode) {
+        console.info('[IAndes] localOnlyMode — skipping token worker');
+        return;
     }
 
-    if (!tokenWorker) return;
+    try {
+        // [FIX-CSP] Paso 1: Fetch del código del worker
+        const workerUrl  = chrome.runtime.getURL('token_worker.js');
+        const response   = await fetch(workerUrl);
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        const workerCode = await response.text();
 
-    tokenWorker.addEventListener('message', (ev) => {
-        const msg = ev.data || {};
-        if (msg.type === 'WORKER_READY') {
-            workerReady = true;
-            return;
-        }
-        if (msg.type === 'WORKER_ERROR') {
-            console.error('[IAndes] Token worker error:', msg.message, msg.stack || '');
-            return;
-        }
-        if (msg.type === 'COUNT_RESULT' && msg.id) {
-            const resolver = workerPending.get(msg.id);
-            if (resolver) {
-                workerPending.delete(msg.id);
-                resolver(msg);
+        // [FIX-CSP] Paso 2: Crear Blob URL (sin restricción de origen del sitio host)
+        const blob    = new Blob([workerCode], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+
+        // [FIX-CSP] Paso 3: Crear Worker desde Blob URL
+        tokenWorker = new Worker(blobUrl);
+
+        // [FIX-CSP] Paso 4: Listeners ANTES de revocar la URL
+        tokenWorker.addEventListener('message', (ev) => {
+            const msg = ev.data || {};
+            if (msg.type === 'WORKER_READY') {
+                workerReady = true;
+                console.info('[IAndes] Token worker listo (blob method)');
+                // [FIX-CSP] Revocar la Blob URL cuando ya no se necesita
+                URL.revokeObjectURL(blobUrl);
+                return;
             }
-            return;
-        }
-        // LOAD_RESULT and other events can be handled if needed
-    });
-})();
+            if (msg.type === 'WORKER_ERROR') {
+                console.error('[IAndes] Worker error:', msg.message, msg.stack || '');
+                return;
+            }
+            if (msg.type === 'COUNT_RESULT' && msg.id) {
+                const resolver = workerPending.get(msg.id);
+                if (resolver) {
+                    workerPending.delete(msg.id);
+                    resolver(msg);
+                }
+            }
+        });
+
+        tokenWorker.addEventListener('error', (e) => {
+            tokenWorkerErrorReason = String(e.message || e);
+            console.warn('[IAndes] Worker runtime error:', tokenWorkerErrorReason);
+            tokenWorker = null;
+        });
+    } catch (e) {
+        tokenWorkerErrorReason = String(e && e.message ? e.message : e);
+        console.warn('[IAndes] Token worker init failed:', tokenWorkerErrorReason);
+        tokenWorker = null;
+    }
+}
+
+// [FIX-CSP] Invocar inicialización
+initTokenWorker();
 
 function countTokensWithWorker(text, model) {
-    if (!tokenWorker) return Promise.resolve({ tokens: estimateTokensLocally(text), source: 'no_worker' });
+    if (!tokenWorker) {
+        // Run heuristic asynchronously to avoid blocking the page (simulate worker)
+        return new Promise((resolve) => {
+            setTimeout(() => {
+                const tokens = estimateTokensLocally(text);
+                const source = tokenWorkerErrorReason ? `local_estimate (no worker: ${tokenWorkerErrorReason})` : 'local_estimate';
+                resolve({ tokens, source });
+            }, 0);
+        });
+    }
+
     return new Promise((resolve) => {
         const id = String(workerReqId++);
         const timeout = setTimeout(() => {
             if (workerPending.has(id)) {
                 workerPending.delete(id);
-                resolve({ tokens: estimateTokensLocally(text), source: 'worker_timeout' });
+                const source = tokenWorkerErrorReason ? `worker_timeout (no worker: ${tokenWorkerErrorReason})` : 'worker_timeout';
+                resolve({ tokens: estimateTokensLocally(text), source });
             }
         }, 1200);
 
@@ -137,7 +179,10 @@ function countTokensWithWorker(text, model) {
         } catch (e) {
             workerPending.delete(id);
             clearTimeout(timeout);
-            resolve({ tokens: estimateTokensLocally(text), source: 'worker_error' });
+            const reason = String(e && e.message ? e.message : e);
+            tokenWorkerErrorReason = reason;
+            console.warn('[IAndes] tokenWorker.postMessage failed:', reason);
+            resolve({ tokens: estimateTokensLocally(text), source: `worker_error (${reason})` });
         }
     });
 }
@@ -243,16 +288,12 @@ function computeEnvironmentalImpactLocal(promptTokens, model) {
 
 
 // ---------------------------------------------------------------------------
-// COMUNICACIÓN CON EL SERVIDOR LOCAL
+// COMPATIBILIDAD LEGACY (SIN SERVIDOR)
 // ---------------------------------------------------------------------------
 
 /**
- * Envía el texto al servidor Python local para obtener:
- *   - Conteo EXACTO de tokens (usando el método correcto del proveedor)
- *   - Impacto ambiental (agua, CO2)
- *
- * Si el servidor no está disponible (apagado, timeout), retorna null
- * y seguimos usando la estimación local.
+ * Función heredada para compatibilidad.
+ * En la versión actual no se usa servidor local; retornamos null.
  *
  * @param {string} text     - El texto del prompt
  * @param {string} provider - "chatgpt", "claude" o "gemini"
@@ -426,6 +467,41 @@ function getOrCreateOverlay() {
     return overlay;
 }
 
+function openPopupFromOverlay() {
+    const popupUrl = chrome.runtime.getURL("popup.html");
+    window.open(popupUrl, "_blank", "noopener,noreferrer");
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function renderOverlayError(message) {
+    const overlay = getOrCreateOverlay();
+    overlay.style.pointerEvents = "auto";
+    overlay.style.cursor = "pointer";
+    overlay.style.userSelect = "auto";
+    overlay.title = "Abrir popup";
+    overlay.onclick = openPopupFromOverlay;
+    overlay.innerHTML = `
+        <div style="color:#ffb347;font-weight:700;letter-spacing:0.05em;margin-bottom:5px;">
+            ▸ IAndes
+        </div>
+        <div style="color:#e0ffe8;line-height:1.55;">
+            ${escapeHtml(message)}
+        </div>
+        <div style="color:#6b8a78;font-size:9px;margin-top:6px;">
+            Ver popup →
+        </div>
+    `;
+    overlay.style.opacity = "1";
+}
+
 /**
  * Actualiza el contenido del overlay con los datos de métricas.
  *
@@ -433,6 +509,11 @@ function getOrCreateOverlay() {
  */
 function renderOverlay(data) {
     const overlay = getOrCreateOverlay();
+    overlay.onclick = null;
+    overlay.title = "";
+    overlay.style.pointerEvents = "none";
+    overlay.style.cursor = "default";
+    overlay.style.userSelect = "none";
 
     // Usar "–" si un valor no está disponible
     const tokens     = data.tokens      ?? "–";
@@ -465,7 +546,177 @@ function renderOverlay(data) {
 /** Oculta el overlay (cuando el campo de texto está vacío) */
 function hideOverlay() {
     const overlay = document.getElementById(CONFIG.overlayId);
-    if (overlay) overlay.style.opacity = "0";
+    if (overlay) {
+        overlay.style.opacity = "0";
+        overlay.style.pointerEvents = "none";
+        overlay.style.cursor = "default";
+        overlay.onclick = null;
+        overlay.title = "";
+    }
+}
+
+// [FIX-CONTEXT] Mostrar aviso en overlay cuando el content script quedó invalidado.
+function showContextInvalidatedOverlay() {
+    const overlay = getOrCreateOverlay();
+    overlay.style.pointerEvents = "none";
+    overlay.style.cursor = "default";
+    overlay.onclick = null;
+    overlay.title = "";
+    overlay.innerHTML = `
+        <div style="color:#ff4d6d;font-weight:700;margin-bottom:6px;">
+            ⚠ IAndes actualizado
+        </div>
+        <div style="font-size:10px;line-height:1.4;">
+            Recarga esta página (F5) para usar la extensión.
+        </div>
+    `;
+    overlay.style.opacity = "1";
+}
+
+function getOrCreateImproveReviewPanel() {
+    let panel = document.getElementById(IMPROVE_REVIEW_ID);
+    if (!panel) {
+        panel = document.createElement("div");
+        panel.id = IMPROVE_REVIEW_ID;
+        panel.style.cssText = `
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            z-index: 2147483647;
+            width: min(560px, calc(100vw - 32px));
+            max-height: min(70vh, 680px);
+            overflow: auto;
+            background: rgba(8, 12, 22, 0.98);
+            border: 1px solid rgba(0, 230, 150, 0.26);
+            border-radius: 14px;
+            box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+            backdrop-filter: blur(10px);
+            color: #e7fff0;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 11px;
+            padding: 12px;
+        `;
+        document.body.appendChild(panel);
+    }
+    return panel;
+}
+
+function hideImproveReviewPanel() {
+    const panel = document.getElementById(IMPROVE_REVIEW_ID);
+    if (panel) panel.remove();
+}
+
+function buildImproveDiffPreview(originalText, improvedText) {
+    const toLines = (text) => String(text || "")
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    const normalize = (line) => line.toLowerCase().replace(/\s+/g, " ").trim();
+    const originalSet = new Set(toLines(originalText).map(normalize));
+    const improvedLines = toLines(improvedText);
+    const decorated = improvedLines.map(line => {
+        const marker = originalSet.has(normalize(line)) ? "   " : "[+]";
+        return `${marker} ${line}`;
+    });
+
+    if (decorated.length > 14) {
+        return `${decorated.slice(0, 14).join("\n")}\n...`;
+    }
+    return decorated.join("\n");
+}
+
+function persistSessionStats(stats, mode = "compress") {
+    if (!stats || typeof stats.savedTokens !== "number") return;
+    if (stats.savedTokens <= 0) return;
+
+    try {
+        chrome.storage.local.get(["iandesSession"], (result) => {
+            if (chrome.runtime.lastError) return;
+
+            const current = result?.iandesSession || {
+                savedTokensTotal: 0,
+                optimizations: 0,
+                totalPct: 0,
+                avgPct: 0,
+                lastMode: "compress",
+            };
+
+            const next = {
+                ...current,
+                savedTokensTotal: Number(current.savedTokensTotal || 0) + stats.savedTokens,
+                optimizations: Number(current.optimizations || 0) + 1,
+                totalPct: Number(current.totalPct || 0) + (Number.isFinite(stats.savedPct) ? stats.savedPct : 0),
+                lastMode: mode,
+                updatedAt: Date.now(),
+            };
+
+            next.avgPct = next.optimizations > 0
+                ? Math.round(next.totalPct / next.optimizations)
+                : 0;
+
+            chrome.storage.local.set({ iandesSession: next });
+        });
+    } catch {}
+}
+
+function renderImproveReviewPanel(originalText, improvedText, stats) {
+    const panel = getOrCreateImproveReviewPanel();
+    const diffPreview = buildImproveDiffPreview(originalText, improvedText);
+    const finalTokens = Number.isFinite(stats?.originalTokens) && Number.isFinite(stats?.savedTokens)
+        ? stats.originalTokens - stats.savedTokens
+        : null;
+
+    const tokenDelta = Number.isFinite(stats?.savedTokens)
+        ? -stats.savedTokens
+        : null;
+    const deltaLabel = tokenDelta == null
+        ? "n/d"
+        : (tokenDelta > 0 ? `+${tokenDelta}` : `${tokenDelta}`);
+
+    panel.innerHTML = `
+        <div style="color:#00e696;font-weight:700;letter-spacing:.05em;margin-bottom:8px;">
+            ▸ IAndes · Revisión de mejora
+        </div>
+        <div style="color:#a8cbb8;font-size:10px;line-height:1.5;margin-bottom:8px;">
+            Verifica los cambios antes de reemplazar el prompt.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:8px;">
+                <div style="font-size:10px;color:#8ba99a;margin-bottom:4px;">Vista previa del diff</div>
+                <pre style="white-space:pre-wrap;word-break:break-word;margin:0;line-height:1.45;color:#e7fff0;">${escapeHtml(diffPreview || "(sin diferencias detectables)")}</pre>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;color:#9bc6ae;font-size:10px;">
+                <span>Original: <b style="color:#dff5e8;">${Number.isFinite(stats?.originalTokens) ? stats.originalTokens : "n/d"}</b> tok</span>
+                <span>Final: <b style="color:#dff5e8;">${finalTokens ?? "n/d"}</b> tok</span>
+                <span>Delta: <b style="color:${tokenDelta > 0 ? "#ffd166" : "#00e696"};">${deltaLabel}</b> tok</span>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button id="iandes-review-discard" style="border:1px solid rgba(255,255,255,0.22);background:transparent;color:#d8e8df;border-radius:8px;padding:6px 10px;cursor:pointer;">Descartar</button>
+                <button id="iandes-review-apply" style="border:1px solid rgba(0,230,150,0.6);background:rgba(0,230,150,0.12);color:#00e696;border-radius:8px;padding:6px 10px;cursor:pointer;">Aceptar y reemplazar</button>
+            </div>
+        </div>
+    `;
+
+    const applyBtn = panel.querySelector("#iandes-review-apply");
+    const discardBtn = panel.querySelector("#iandes-review-discard");
+
+    applyBtn?.addEventListener("click", () => {
+        hideImproveReviewPanel();
+        injectOptimizedPrompt(improvedText, stats, "improve");
+        renderOverlayError("Mejora aplicada. Puedes seguir editando o enviar.");
+    });
+
+    discardBtn?.addEventListener("click", () => {
+        hideImproveReviewPanel();
+        renderOverlayError("Mejora descartada. El prompt original se mantiene.");
+    });
+}
+
+function isImproveResultMessage(msg) {
+    if (msg?.mode === "improve") return true;
+    const layers = Array.isArray(msg?.stats?.layers) ? msg.stats.layers : [];
+    return layers.includes("layer1m") || layers.includes("layer2m");
 }
 
 
@@ -483,12 +734,26 @@ function hideOverlay() {
  *   4. Clasificar el prompt (Capa 0)
  *   5. Aplicar filtro léxico si corresponde (Capa 1)
  *   6. Enviar al Service Worker para Capas 2 y 3
+ * 
+ * [FASE 4] Leer el modo una sola vez y enviarlo con el request al background.
  */
 async function processPrompt(text) {
     if (!text || !text.trim()) {
         hideOverlay();
+        hideImproveReviewPanel();
         return;
     }
+
+    hideImproveReviewPanel();
+
+    // Evitar procesar varias veces el mismo texto en una ventana corta.
+    const normalizedText = text.trim();
+    const now = Date.now();
+    if (normalizedText === lastProcessedPrompt && now - lastProcessedAt < 1200) {
+        return;
+    }
+    lastProcessedPrompt = normalizedText;
+    lastProcessedAt = now;
 
     // --- PASO 1: Mostrar estimación inmediata mientras el servidor responde ---
     const estimatedTokens = estimateTokensLocally(text);
@@ -496,7 +761,7 @@ async function processPrompt(text) {
     const impact = computeEnvironmentalImpactLocal(estimatedTokens, PROVIDER.model);
     renderOverlay({
         tokens:   estimatedTokens,
-        source:   "local_estimate",
+        source:   CONFIG.localOnlyMode ? 'local_only' : 'local_estimate',
         provider: PROVIDER.id,
         completion_est: impact.completion_est,
         tokens_total:   impact.tokens_total,
@@ -507,42 +772,102 @@ async function processPrompt(text) {
     });
 
     // Guardar en window para que el popup y devtools puedan acceder
-    try { window.__iandes = { ...impact, text, provider: PROVIDER.id, model: PROVIDER.model, tokens: estimatedTokens }; } catch {}
-
-    // Pedir al Web Worker un conteo más preciso (si está disponible)
     try {
-        countTokensWithWorker(text, PROVIDER.model).then(({ tokens: workerTokens, source }) => {
-            if (typeof workerTokens === 'number' && workerTokens >= 0) {
-                const impact2 = computeEnvironmentalImpactLocal(workerTokens, PROVIDER.model);
-                renderOverlay({
-                    tokens: workerTokens,
-                    source: source || 'worker',
-                    provider: PROVIDER.id,
-                    completion_est: impact2.completion_est,
-                    tokens_total:   impact2.tokens_total,
-                    water_ml:    impact2.water_ml,
-                    water_drops: impact2.water_drops,
-                    co2_g:       impact2.co2_g,
-                    co2_steps:   impact2.co2_steps,
-                });
-                try { window.__iandes = { ...impact2, text, provider: PROVIDER.id, model: PROVIDER.model, tokens: workerTokens }; } catch {}
-            }
-        }).catch(() => {});
+        window.__iandes = {
+            ...impact,
+            text,
+            provider: PROVIDER.id,
+            model: PROVIDER.model,
+            tokens: estimatedTokens,
+            source: CONFIG.localOnlyMode ? 'local_only' : 'local_estimate',
+        };
     } catch {}
+
+    // Si no estamos en modo localOnly, pedir al Worker un conteo más preciso
+    if (!CONFIG.localOnlyMode) {
+        try {
+            countTokensWithWorker(text, PROVIDER.model).then(({ tokens: workerTokens, source }) => {
+                if (typeof workerTokens === 'number' && workerTokens >= 0) {
+                    const impact2 = computeEnvironmentalImpactLocal(workerTokens, PROVIDER.model);
+                    renderOverlay({
+                        tokens: workerTokens,
+                        source: source || 'worker',
+                        provider: PROVIDER.id,
+                        completion_est: impact2.completion_est,
+                        tokens_total:   impact2.tokens_total,
+                        water_ml:    impact2.water_ml,
+                        water_drops: impact2.water_drops,
+                        co2_g:       impact2.co2_g,
+                        co2_steps:   impact2.co2_steps,
+                    });
+                    try {
+                        window.__iandes = {
+                            ...impact2,
+                            text,
+                            provider: PROVIDER.id,
+                            model: PROVIDER.model,
+                            tokens: workerTokens,
+                            source: source || 'worker',
+                        };
+                    } catch {}
+                }
+            }).catch(() => {});
+        } catch {}
+    }
 
     // --- PASO 3: Clasificar el prompt (Capa 0) ---
     const classification = classifyPrompt(text);
     console.log(`[IAndes] Perfil: ${classification.profile} → capas: ${classification.layers}`);
 
-    // Si el prompt ya es óptimo, no hacer nada más
-    if (classification.layers.length === 0) {
+    // [FASE 4] Leer el modo de almacenamiento y ajustar el pipeline sin cambiarlo a mitad del proceso.
+    let finalLayers = classification.layers;
+    let mode = 'compress';
+    try {
+        // [FIX-CONTEXT] Verificar que el contexto de extensión siga activo.
+        if (!chrome.runtime?.id) {
+            throw new Error('Extension context invalidated');
+        }
+
+        const storage = await new Promise((resolve, reject) => {
+            chrome.storage.local.get(['mode'], (result) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                } else {
+                    resolve(result || {});
+                }
+            });
+        });
+        mode = storage.mode || 'compress';
+
+        if (mode === 'improve') {
+            finalLayers = finalLayers.filter(layer => layer !== 1);
+            if (!finalLayers.includes(3)) {
+                finalLayers = [...finalLayers, 3];
+            }
+        } else if (classification.layers.length === 0) {
+            // Si el prompt ya es óptimo y modo es 'compress', no hacer nada.
+            console.log("[IAndes] Prompt ya óptimo, sin transformación");
+            return;
+        }
+    } catch (err) {
+        const message = String(err?.message || err || '');
+        if (message.toLowerCase().includes('invalidated')) {
+            console.warn('[IAndes] Extension recargada — por favor recarga la página para usar IAndes');
+            showContextInvalidatedOverlay();
+            return;
+        }
+        console.warn("[IAndes] No se pudo leer modo desde storage:", err);
+    }
+
+    // Si el prompt ya es óptimo y modo es 'compress', no hacer nada
+    if (finalLayers.length === 0) {
         console.log("[IAndes] Prompt ya óptimo, sin transformación");
         return;
     }
 
     // --- PASO 4: Aplicar Capa 1 (filtro léxico) si está en el pipeline ---
     let optimizedText = text;
-    if (classification.layers.includes(1)) {
+    if (mode !== 'improve' && finalLayers.includes(1)) {
         optimizedText = applyLayer1(text);
         const savedTokens = estimateTokensLocally(text) - estimateTokensLocally(optimizedText);
         if (savedTokens > 0) {
@@ -551,17 +876,47 @@ async function processPrompt(text) {
     }
 
     // --- PASO 5: Delegar Capas 2+3 al Service Worker ---
-    if (classification.layers.includes(2) || classification.layers.includes(3)) {
-        try {
-            chrome.runtime.sendMessage({
-                type:           "OPTIMIZE_PROMPT",
-                text:           optimizedText,
-                classification,
-                provider:       PROVIDER.id,  // El SW también necesita saber el proveedor
-            });
-        } catch {
-            // El Service Worker puede no estar listo aún en primera carga
-            console.warn("[IAndes] Service Worker no disponible para Capas 2+3");
+    if (finalLayers.includes(2) || finalLayers.includes(3)) {
+        if (CONFIG.localOnlyMode) {
+            console.info('[IAndes] localOnlyMode: no delegando Capas 2+3 al Service Worker');
+        } else {
+            try {
+                // [FIX-CONTEXT] Verificar que el contexto siga activo antes de enviar mensaje.
+                if (!chrome.runtime?.id) {
+                    throw new Error('Extension context invalidated');
+                }
+
+                // Actualizar classification.layers con el valor final
+                const updatedClassification = { ...classification, layers: finalLayers };
+                chrome.runtime.sendMessage(
+                    {
+                        type:           "OPTIMIZE_PROMPT",
+                        text:           optimizedText,
+                        classification: updatedClassification,
+                        mode,
+                        provider:       PROVIDER.id,  // El SW también necesita saber el proveedor
+                    },
+                    () => {
+                        if (chrome.runtime.lastError) {
+                            const msg = chrome.runtime.lastError.message || '';
+                            if (msg.toLowerCase().includes('invalidated')) {
+                                console.warn('[IAndes] Extension recargada — recarga la página para continuar');
+                                showContextInvalidatedOverlay();
+                                return;
+                            }
+                            console.info('[IAndes] Service Worker no disponible para Capas 2+3:', msg);
+                        }
+                    }
+                );
+            } catch (e) {
+                const message = String(e?.message || e || '');
+                if (message.toLowerCase().includes('invalidated')) {
+                    console.warn('[IAndes] Extension recargada — recarga la página para continuar');
+                    showContextInvalidatedOverlay();
+                    return;
+                }
+                console.warn("[IAndes] Service Worker no disponible para Capas 2+3", e);
+            }
         }
     }
 }
@@ -611,13 +966,36 @@ function attachListener(el) {
     // Timer para el debounce (esperar antes de procesar)
     let debounceTimer = null;
 
+    // [FIX-CONTEXT] Ejecutar processPrompt solo si el contexto de extensión sigue vivo.
+    function runProcessPromptSafely() {
+        if (!chrome.runtime?.id) {
+            showContextInvalidatedOverlay();
+            return;
+        }
+
+        textoTemporal = readValue();
+        Promise.resolve(processPrompt(textoTemporal)).catch((err) => {
+            const message = String(err?.message || err || '');
+            if (message.toLowerCase().includes('invalidated')) {
+                console.warn('[IAndes] Extension recargada — recarga la página para continuar');
+                showContextInvalidatedOverlay();
+                return;
+            }
+            console.warn('[IAndes] processPrompt falló:', err);
+        });
+    }
+
     function scheduleProcess(delayMs = CONFIG.debounceMs) {
+        if (suppressNextScheduledProcess) {
+            suppressNextScheduledProcess = false;
+            return;
+        }
+
         // Cancelar cualquier procesamiento pendiente
         clearTimeout(debounceTimer);
         // Programar uno nuevo
         debounceTimer = setTimeout(() => {
-            textoTemporal = readValue();
-            processPrompt(textoTemporal);
+            runProcessPromptSafely();
         }, delayMs);
     }
 
@@ -637,8 +1015,7 @@ function attachListener(el) {
     // Al perder el foco → procesar inmediatamente (sin esperar el debounce)
     el.addEventListener("blur", () => {
         clearTimeout(debounceTimer);
-        textoTemporal = readValue();
-        processPrompt(textoTemporal);
+        runProcessPromptSafely();
     });
 }
 
@@ -650,14 +1027,34 @@ function attachListener(el) {
 /**
  * Cuando el Service Worker termina de optimizar el prompt (Capas 2 y/o 3),
  * nos manda el texto optimizado para inyectarlo de vuelta en el campo.
+ * 
+ * MODIFICADO: Corregir GET_METRICS para usar sendResponse en MV3.
+ * El uso de 'return' directamente no funciona en Chrome MV3 messaging.
  */
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "OPTIMIZED_PROMPT") {
-        injectOptimizedPrompt(msg.text, msg.stats);
+        if (isImproveResultMessage(msg)) {
+            renderImproveReviewPanel(msg.originalText || textoTemporal || "", msg.text, msg.stats || {});
+        } else {
+            injectOptimizedPrompt(msg.text, msg.stats, msg.mode || "compress");
+        }
+        return;
+    }
+
+    if (msg.type === "OPTIMIZATION_INFO") {
+        renderOverlayError(msg.message || "No se aplicaron cambios.");
+        return;
+    }
+
+    if (msg.type === "OPTIMIZATION_ERROR") {
+        renderOverlayError(msg.message || "Modo Mejorar requiere Ollama. Ver popup →");
+        return;
     }
     // El popup puede pedirle las métricas actuales al content script
+    // MODIFICADO: usar sendResponse() en lugar de return
     if (msg.type === "GET_METRICS") {
-        return window.__iandes || null;
+        sendResponse(window.__iandes || null);
+        return true; // Indica que la respuesta es asíncrona
     }
 });
 
@@ -667,11 +1064,22 @@ chrome.runtime.onMessage.addListener((msg) => {
  * @param {string} newText - El texto optimizado por las Capas 2+3
  * @param {object} stats   - Estadísticas de ahorro (opcional)
  */
-function injectOptimizedPrompt(newText, stats) {
+function injectOptimizedPrompt(newText, stats, mode = "compress") {
     const inputs = getChatInputs();
     // Preferir el campo que tiene el foco; si ninguno, usar el primero
     const targetEl = inputs.find(el => el === document.activeElement) || inputs[0];
     if (!targetEl) return;
+
+    const currentText = targetEl.value !== undefined
+        ? targetEl.value
+        : (targetEl.innerText || targetEl.textContent || "");
+
+    if ((currentText || "").trim() === (newText || "").trim()) {
+        return;
+    }
+
+    // Evita re-procesar inmediatamente el mismo texto por el evento input sintético.
+    suppressNextScheduledProcess = true;
 
     // Inyectar el texto según el tipo de campo
     if (targetEl.value !== undefined) {
@@ -686,6 +1094,7 @@ function injectOptimizedPrompt(newText, stats) {
 
     if (stats) {
         console.log(`[IAndes] ✓ Optimización completa: −${stats.savedTokens} tokens (${stats.savedPct}%)`);
+        persistSessionStats(stats, mode);
     }
 }
 

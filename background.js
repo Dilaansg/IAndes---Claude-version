@@ -41,10 +41,13 @@
 const ONNX_MODEL_URL  = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
 const ONNX_CACHE_NAME = "iandes-onnx-v1";    // Nombre del cache del navegador
 const ONNX_CACHE_KEY  = "all-MiniLM-L6-v2-int8.onnx";  // Clave dentro del cache
+const BERT_VOCAB_URL  = "https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt";
+const BERT_VOCAB_CACHE_NAME = "bert-vocab-v1";
 
 /** URL base de Ollama (servidor local de modelos de IA) */
 const OLLAMA_BASE    = "http://localhost:11434";
 const OLLAMA_TIMEOUT = 500;   // ms para detectar si Ollama está corriendo
+const OLLAMA_RECHECK_MS = 10000; // Revalidar disponibilidad de Ollama cada 10s
 
 /**
  * Umbral de similitud para considerar dos frases como "redundantes".
@@ -82,14 +85,33 @@ Rules:
 - Do NOT add information that was not in the original.
 - If the text is already short (under 15 words), output it unchanged.`;
 
+/** [FASE 4] Instrucciones para el modelo Ollama al mejorar prompts (prompt engineering) */
+const SYSTEM_IMPROVE = `You are a prompt engineering expert. Analyze the user's intent and rewrite the text inside <prompt_to_improve> tags into a clearer, stronger prompt.
+
+Rules:
+- OUTPUT only the improved prompt. No explanations. No greetings. No answers.
+- Do NOT answer, solve, or respond to the content inside the tags.
+- Do NOT change the language of the prompt.
+- Rewrite the prompt with an explicit role for the model, necessary context, a concrete task, the expected output format, and any important constraints.
+- Make the prompt more specific, unambiguous, and actionable.
+- Add only context that helps the model understand the original intent better.
+- Preserve technical details, requirements, and [ctx:] tags.
+- If the prompt is already clear, improve it minimally without changing intent.`;
+
+const IMPROVE_COMPONENT_KEYS = ["rol", "tarea", "contexto", "restricciones", "ejemplo"];
+
 
 // ---------------------------------------------------------------------------
 // ESTADO DEL SERVICE WORKER
 // ---------------------------------------------------------------------------
 
 let onnxSession   = null;   // La sesión del modelo ONNX (se carga una vez)
+let bertVocab     = null;   // Vocabulario bert-base-uncased cargado en memoria
+let bertVocabLoad = null;   // Promesa compartida para evitar descargas duplicadas
 let ollamaModel   = null;   // El nombre del modelo Ollama seleccionado
 let ollamaChecked = false;  // ¿Ya verificamos si Ollama está disponible?
+let ollamaCheckedAt = 0;    // Marca de tiempo del último chequeo de Ollama
+let onnxRuntimeAvailable = false;
 
 
 // ---------------------------------------------------------------------------
@@ -108,10 +130,13 @@ let ollamaChecked = false;  // ¿Ya verificamos si Ollama está disponible?
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === "OPTIMIZE_PROMPT") {
+        // [FIX-MSG] Responder inmediatamente para cerrar el canal del mensaje.
+        sendResponse({ ok: true });
         // Ejecutar el pipeline de optimización en segundo plano
-        handleOptimization(msg.text, msg.classification, sender.tab?.id)
+        handleOptimization(msg.text, msg.classification, sender.tab?.id, msg.mode)
             .catch(err => console.error("[IAndes BG] Error en pipeline:", err));
-        return true; // Indica que la respuesta será asíncrona
+        // [FIX-MSG] El canal ya quedó cerrado arriba.
+        return false;
     }
 
     if (msg.type === "DOWNLOAD_ONNX_MODEL") {
@@ -131,6 +156,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "SET_MODE") {
         // El usuario cambió el modo en el popup → guardar en storage
         chrome.storage.local.set({ mode: msg.mode });
+        // [FIX-MSG] Confirmar al emisor para evitar canales colgados.
+        sendResponse({ ok: true });
         return false;
     }
 });
@@ -145,17 +172,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  *
  * Si alguna capa falla (modelo no disponible, Ollama apagado, etc.),
  * el pipeline continúa con lo que tenga, sin interrumpirse.
+ * 
+ * [FASE 4] El modo llega desde content.js para evitar cambios a mitad del flujo.
  *
  * @param {string} text           - El texto después de aplicar Capa 1
  * @param {object} classification - Resultado de classifyPrompt (de content.js)
  * @param {number} tabId          - ID de la pestaña para devolver el resultado
+ * @param {string} mode           - Modo de operación: 'compress' | 'improve'
  */
-async function handleOptimization(text, classification, tabId) {
+async function handleOptimization(text, classification, tabId, mode = 'compress') {
     let result = text;
     const stats = {
         originalTokens: estimateTokens(text),
         layers: [],   // Qué capas se activaron realmente
     };
+    console.log(`[IAndes BG] Modo de operación: ${mode}`);
+
+    let improveAnalysis = null;
+    let improveModel = null;
+
+    if (mode === 'improve') {
+        improveAnalysis = analyzeImproveComponents(result);
+        if (improveAnalysis.scoreCompleteness >= 0.8) {
+            if (tabId) {
+                chrome.tabs.sendMessage(tabId, {
+                    type: "OPTIMIZATION_INFO",
+                    mode: "improve",
+                    message: "Tu prompt ya esta bien construido. No se aplicaron cambios.",
+                });
+            }
+            return;
+        }
+
+        improveModel = await getOllamaModel(true);
+    }
 
     // --- CAPA 2: Deduplicación semántica ---
     if (classification.layers.includes(2)) {
@@ -177,16 +227,42 @@ async function handleOptimization(text, classification, tabId) {
     // --- CAPA 3: Reescritura con Ollama ---
     if (classification.layers.includes(3)) {
         try {
-            const model = await getOllamaModel();
-            if (model) {
-                const rewritten = await layer3Rewrite(result, model);
-                if (rewritten && rewritten !== result) {
-                    stats.layers.push("layer3");
-                    result = rewritten;
-                    console.log("[IAndes BG] Capa 3 aplicada: texto reescrito con Ollama");
+            let rewritten = null;
+
+            if (mode === 'improve') {
+                if (improveModel) {
+                    rewritten = await layer3Rewrite(result, improveModel, mode, improveAnalysis);
+                    if (rewritten && rewritten !== result) {
+                        stats.layers.push("layer2m");
+                        result = rewritten;
+                        console.log("[IAndes BG] Capa 2-M aplicada: mejora generativa con Ollama");
+                    }
+                } else {
+                    rewritten = applyImproveTemplate(result, improveAnalysis);
+                    if (rewritten && rewritten !== result) {
+                        stats.layers.push("layer1m");
+                        result = rewritten;
+                        console.log("[IAndes BG] Capa 1-M aplicada: mejora por plantilla");
+                    } else if (tabId) {
+                        chrome.tabs.sendMessage(tabId, {
+                            type: "OPTIMIZATION_INFO",
+                            mode: "improve",
+                            message: "Modo Mejorar sin Ollama: no hubo mejoras estructurales claras.",
+                        });
+                    }
                 }
             } else {
-                console.log("[IAndes BG] Capa 3 no disponible: Ollama no encontrado");
+                const model = await getOllamaModel(false);
+                if (model) {
+                    rewritten = await layer3Rewrite(result, model, mode, null);
+                    if (rewritten && rewritten !== result) {
+                        stats.layers.push("layer3");
+                        result = rewritten;
+                        console.log("[IAndes BG] Capa 3 aplicada: texto reescrito con Ollama");
+                    }
+                } else {
+                    console.log("[IAndes BG] Capa 3 no disponible: Ollama no encontrado");
+                }
             }
         } catch (err) {
             console.warn("[IAndes BG] Capa 3 falló:", err.message);
@@ -203,8 +279,99 @@ async function handleOptimization(text, classification, tabId) {
             type:  "OPTIMIZED_PROMPT",
             text:  result,
             stats,
+            mode,
+            originalText: text,
         });
     }
+}
+
+function normalizeForMatching(text) {
+    return (text || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+}
+
+function analyzeImproveComponents(text) {
+    const normalized = normalizeForMatching(text);
+
+    const hasRole = /\b(actua como|asume el rol|eres un|you are|act as)\b/i.test(normalized);
+    const hasTask = /\b(explica|resume|analiza|compara|genera|escribe|corrige|traduce|describe|clasifica|planifica|explain|summarize|analyze|compare|generate|write|fix|translate|describe)\b/i.test(normalized);
+    const hasContext = /\b(para|contexto|soy|estoy|trabajo|proyecto|curso|nivel|audiencia|for|context|i am|my goal|background)\b/i.test(normalized);
+    const hasConstraints = /\b(maximo|maximo de|minimo|en menos de|sin |solo |formato|estructura|limite|no uses|avoid|at most|under|format)\b/i.test(normalized);
+    const hasExample = /\b(por ejemplo|ejemplo|como si|similar a|for example|example|like this)\b/i.test(normalized);
+
+    const presence = {
+        rol: hasRole,
+        tarea: hasTask,
+        contexto: hasContext,
+        restricciones: hasConstraints,
+        ejemplo: hasExample,
+    };
+
+    const presentComponents = IMPROVE_COMPONENT_KEYS.filter(key => presence[key]);
+    const missingComponents = IMPROVE_COMPONENT_KEYS.filter(key => !presence[key]);
+
+    return {
+        presentComponents,
+        missingComponents,
+        scoreCompleteness: presentComponents.length / IMPROVE_COMPONENT_KEYS.length,
+    };
+}
+
+function detectImproveTaskType(text) {
+    const normalized = normalizeForMatching(text);
+    if (/\b(codigo|code|bug|error|function|javascript|python|typescript|sql|api)\b/i.test(normalized)) return "code";
+    if (/\b(resume|resumen|sintetiza|summary)\b/i.test(normalized)) return "summary";
+    if (/\b(crea|invent[a]?|historia|cuento|poema|guion|story|creative|brainstorm)\b/i.test(normalized)) return "creative";
+    if (/\b(analiza|compara|ventajas|desventajas|pros|cons|evaluate|comparison)\b/i.test(normalized)) return "analysis";
+    return "explanation";
+}
+
+function applyImproveTemplate(text, analysis) {
+    const base = (text || "").trim();
+    if (!base) return text;
+
+    const missing = new Set(analysis?.missingComponents || []);
+    if (!missing.size) return text;
+
+    const taskType = detectImproveTaskType(base);
+    const additions = [];
+
+    if (missing.has("rol")) {
+        if (taskType === "code") additions.push("Actua como un ingeniero de software senior.");
+        else if (taskType === "creative") additions.push("Actua como un redactor creativo experto.");
+        else if (taskType === "analysis") additions.push("Actua como un analista riguroso y objetivo.");
+        else additions.push("Actua como un experto en el tema.");
+    }
+
+    if (missing.has("contexto")) {
+        if (taskType === "code") additions.push("Contexto: estoy resolviendo un problema tecnico y necesito una explicacion util para aplicar de inmediato.");
+        else additions.push("Contexto: necesito una respuesta clara para entender y aplicar el resultado rapidamente.");
+    }
+
+    if (missing.has("restricciones")) {
+        if (taskType === "summary") additions.push("Entrega un resumen en 5 puntos clave, directo y sin relleno.");
+        else if (taskType === "code") additions.push("Incluye pasos concretos, causa raiz y solucion final en formato de lista.");
+        else additions.push("Usa un formato estructurado y concreto, evitando informacion irrelevante.");
+    }
+
+    if (missing.has("ejemplo")) {
+        additions.push("Si aplica, agrega un ejemplo breve para ilustrar la respuesta.");
+    }
+
+    if (missing.has("tarea")) {
+        additions.push("Define explicitamente la tarea principal que debe resolver el modelo.");
+    }
+
+    if (!additions.length) return text;
+
+    const improved = [
+        ...additions,
+        base,
+    ].join("\n");
+
+    return improved.trim();
 }
 
 
@@ -318,14 +485,14 @@ function slidingWindowChunks(text, size, overlap) {
  * @returns {Float32Array} - Vector de 384 dimensiones
  */
 async function computeEmbedding(session, text) {
-    // Paso 1: Tokenizar el texto (convertir palabras a números)
-    const inputIds = tokenizeForMiniLM(text);
-    const mask     = new Array(inputIds.length).fill(1);  // Todos los tokens son válidos
+    // Paso 1: Tokenizar con vocabulario BERT real y WordPiece.
+    const inputIds = tokenizeForMiniLM(text, bertVocab);
+    const attentionMask = inputIds.map(id => (id === 0 ? 0 : 1));
 
     // Paso 2: Preparar los tensores de entrada para el modelo
     const feeds = {
         input_ids:      new ort.Tensor("int64", BigInt64Array.from(inputIds.map(BigInt)), [1, inputIds.length]),
-        attention_mask: new ort.Tensor("int64", BigInt64Array.from(mask.map(BigInt)),     [1, inputIds.length]),
+        attention_mask: new ort.Tensor("int64", BigInt64Array.from(attentionMask.map(BigInt)), [1, inputIds.length]),
         token_type_ids: new ort.Tensor("int64", new BigInt64Array(inputIds.length).fill(0n), [1, inputIds.length]),
     };
 
@@ -333,26 +500,33 @@ async function computeEmbedding(session, text) {
     const output = await session.run(feeds);
 
     // Paso 4: Mean pooling — promediar todos los vectores por token para
-    // obtener un único vector que representa todo el texto
-    return meanPool(output.last_hidden_state.data, inputIds.length, 384);
+    // obtener un único vector que representa todo el texto.
+    // Los tokens PAD quedan fuera del promedio.
+    return meanPool(output.last_hidden_state.data, attentionMask, 384);
 }
 
 /**
  * Mean pooling: promedia los vectores de todos los tokens para obtener
  * un único vector representativo del texto completo.
  *
- * @param {Float32Array} hiddenState - Salida del modelo (seqLen × hiddenSize)
- * @param {number}       seqLen     - Número de tokens
- * @param {number}       hiddenSize - Dimensión del vector (384 para MiniLM)
+ * @param {Float32Array} hiddenState   - Salida del modelo (seqLen × hiddenSize)
+ * @param {number[]}     attentionMask - Máscara con 1 para tokens reales y 0 para PAD
+ * @param {number}       hiddenSize    - Dimensión del vector (384 para MiniLM)
  */
-function meanPool(hiddenState, seqLen, hiddenSize) {
+function meanPool(hiddenState, attentionMask, hiddenSize) {
     const result = new Float32Array(hiddenSize);
-    for (let t = 0; t < seqLen; t++) {
+    let tokenCount = 0;
+
+    for (let t = 0; t < attentionMask.length; t++) {
+        if (!attentionMask[t]) continue;
+        tokenCount++;
         for (let h = 0; h < hiddenSize; h++) {
             result[h] += hiddenState[t * hiddenSize + h];
         }
     }
-    for (let h = 0; h < hiddenSize; h++) result[h] /= seqLen;
+
+    if (tokenCount === 0) return result;
+    for (let h = 0; h < hiddenSize; h++) result[h] /= tokenCount;
     return result;
 }
 
@@ -377,25 +551,132 @@ function cosineSimilarity(a, b) {
 }
 
 /**
- * Tokenización simplificada para all-MiniLM-L6-v2.
+ * Carga el vocabulario bert-base-uncased desde Hugging Face y lo guarda
+ * en Cache API para evitar redescargas en reinicios del Service Worker.
  *
- * NOTA: Esta es una aproximación. Para producción completa se debería
- * integrar el tokenizador oficial de Transformers.js, que requiere un
- * paso de build con webpack/rollup.
+ * Si la descarga falla y no hay una copia en caché, se lanza un error claro
+ * para que la Capa 2 se desactive sin romper el resto del pipeline.
  */
-function tokenizeForMiniLM(text) {
-    const CLS     = 101;    // Token especial de inicio [CLS]
-    const SEP     = 102;    // Token especial de fin [SEP]
-    const MAX_LEN = 128;    // Longitud máxima de MiniLM
+async function loadBertVocab(url = BERT_VOCAB_URL) {
+    if (bertVocab) return bertVocab;
+    if (bertVocabLoad) return bertVocabLoad;
 
-    const words   = text.toLowerCase().trim().split(/\s+/).slice(0, MAX_LEN - 2);
-    // Convertir cada palabra a un ID numérico usando un hash simple
-    const wordIds = words.map(w => {
-        let hash = 0;
-        for (const c of w) hash = (hash * 31 + c.charCodeAt(0)) & 0x7FFF;
-        return Math.max(1000, hash % 30000); // Evitar IDs de tokens especiales (<1000)
+    bertVocabLoad = (async () => {
+        const cache = await caches.open(BERT_VOCAB_CACHE_NAME);
+        const request = new Request(url);
+        let response = await cache.match(request);
+
+        if (!response) {
+            const fetched = await fetch(request);
+            if (!fetched.ok) throw new Error("ONNX vocab not available");
+            await cache.put(request, fetched.clone());
+            response = fetched;
+        }
+
+        const text = await response.text();
+        const vocab = new Map();
+        let tokenId = 0;
+
+        for (const line of text.split(/\r?\n/)) {
+            const token = line.trim();
+            if (!token) continue;
+            vocab.set(token, tokenId++);
+        }
+
+        bertVocab = vocab;
+        return vocab;
+    })().catch(err => {
+        bertVocabLoad = null;
+        if (err?.message === "ONNX vocab not available") throw err;
+        throw new Error("ONNX vocab not available");
     });
-    return [CLS, ...wordIds, SEP];
+
+    return bertVocabLoad;
+}
+
+/**
+ * Divide una palabra en subwords usando el algoritmo WordPiece básico.
+ *
+ * Busca siempre el fragmento más largo posible. Si no hay subwords válidos,
+ * devuelve [UNK].
+ *
+ * @param {string} word - Palabra ya separada por la tokenización básica
+ * @param {Map<string, number>} vocab - Vocabulario bert-base-uncased
+ * @returns {string[]} - Subtokens WordPiece para esa palabra
+ */
+function wordpieceTokenize(word, vocab) {
+    if (!word) return [];
+    if (vocab.has(word)) return [word];
+
+    const tokens = [];
+    let start = 0;
+
+    while (start < word.length) {
+        let end = word.length;
+        let matchedToken = null;
+
+        while (start < end) {
+            const piece = start === 0 ? word.slice(start, end) : `##${word.slice(start, end)}`;
+            if (vocab.has(piece)) {
+                matchedToken = piece;
+                break;
+            }
+            end--;
+        }
+
+        if (!matchedToken) return ["[UNK]"];
+
+        tokens.push(matchedToken);
+        start = end;
+    }
+
+    return tokens;
+}
+
+/**
+ * Tokenización compatible con bert-base-uncased.
+ *
+ * Flujo:
+ *   1. Lowercase
+ *   2. Separación básica por palabras y puntuación
+ *   3. WordPiece por cada token
+ *   4. [CLS] / [SEP]
+ *   5. Truncado y padding a MAX_LEN = 128
+ */
+function tokenizeForMiniLM(text, vocab) {
+    const CLS = 101;
+    const SEP = 102;
+    const UNK = 100;
+    const PAD = 0;
+    const MAX_LEN = 128;
+
+    if (!vocab) throw new Error("ONNX vocab not available");
+
+    const basicTokens = (text || "")
+        .toLowerCase()
+        .match(/[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) ?? [];
+
+    const wordpieceTokens = [];
+
+    for (const token of basicTokens) {
+        const pieces = wordpieceTokenize(token, vocab);
+        for (const piece of pieces) {
+            if (wordpieceTokens.length >= MAX_LEN - 2) break;
+            wordpieceTokens.push(piece);
+        }
+        if (wordpieceTokens.length >= MAX_LEN - 2) break;
+    }
+
+    const tokens = ["[CLS]", ...wordpieceTokens, "[SEP]"];
+    while (tokens.length < MAX_LEN) tokens.push("[PAD]");
+
+    return tokens.map(token => {
+        if (token === "[CLS]") return CLS;
+        if (token === "[SEP]") return SEP;
+        if (token === "[UNK]") return UNK;
+        if (token === "[PAD]") return PAD;
+        return vocab.get(token) ?? UNK;
+    });
 }
 
 
@@ -408,24 +689,44 @@ function tokenizeForMiniLM(text) {
  *
  * Solo se ejecuta si Ollama está corriendo en localhost:11434 Y tiene
  * un modelo adecuado (ver sistema de scoring más abajo).
+ * 
+ * MODIFICADO: Aceptar parámetro 'mode' para usar diferentes system prompts.
  *
  * @param {string} text  - El texto a reescribir
  * @param {string} model - El nombre del modelo Ollama a usar
+ * @param {string} mode  - Modo de operación: 'compress' o 'improve'
  * @returns {string|null} - El texto reescrito, o null si falló
  */
-async function layer3Rewrite(text, model) {
+async function layer3Rewrite(text, model, mode = 'compress', improveAnalysis = null) {
+    // [FASE 4] Seleccionar el system prompt según el modo
+    let systemPrompt = SYSTEM_COMPRESS;
+    let userPromptTag = 'prompt_to_compress';
+    
+    if (mode === 'improve') {
+        systemPrompt = SYSTEM_IMPROVE;
+        userPromptTag = 'prompt_to_improve';
+    }
+    
+    const improveAnalysisInstruction = mode === 'improve' && improveAnalysis
+        ? `The analysis shows these components are MISSING: ${(improveAnalysis.missingComponents || []).join(", ") || "none"}.\nThese components are PRESENT (do NOT modify them): ${(improveAnalysis.presentComponents || []).join(", ") || "none"}.\n`
+        : "";
+
     const body = {
         model,
         messages: [
-            { role: "system", content: SYSTEM_COMPRESS },
-            { role: "user",   content: `<prompt_to_compress>${text}</prompt_to_compress>` },
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: `${improveAnalysisInstruction}<${userPromptTag}>${text}</${userPromptTag}>` },
         ],
         stream: false,   // Queremos la respuesta completa, no streaming
     };
 
     const resp = await fetch(`${OLLAMA_BASE}/api/chat`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        // [FIX-CORS] Forzar Origin: null para compatibilidad con extensiones MV3.
+        headers: {
+            "Content-Type": "application/json",
+            "Origin": "null",
+        },
         body:    JSON.stringify(body),
     });
 
@@ -447,9 +748,13 @@ async function layer3Rewrite(text, model) {
  * Se hace una sola vez por sesión del Service Worker para no hacer
  * peticiones repetidas a Ollama.
  */
-async function getOllamaModel() {
-    if (ollamaChecked) return ollamaModel;
+async function getOllamaModel(forceRefresh = false) {
+    const now = Date.now();
+    const cacheValid = ollamaChecked && (now - ollamaCheckedAt) < OLLAMA_RECHECK_MS;
+    if (!forceRefresh && cacheValid) return ollamaModel;
+
     ollamaChecked = true;
+    ollamaCheckedAt = now;
 
     try {
         // Intentar conectar a Ollama con un timeout corto
@@ -457,7 +762,9 @@ async function getOllamaModel() {
         const tid = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT);
 
         const resp = await fetch(`${OLLAMA_BASE}/api/tags`, {
-            signal: controller.signal
+            // [FIX-CORS] Forzar Origin: null para compatibilidad con extensiones MV3.
+            signal: controller.signal,
+            headers: { "Origin": "null" },
         });
         clearTimeout(tid);
 
@@ -485,7 +792,7 @@ async function getOllamaModel() {
  * Calcula la puntuación de un modelo Ollama según el sistema de scoring.
  *
  * Buscamos modelos que sean buenos siguiendo instrucciones pero no tan
- * grandes que sean lentos. El modelo ideal: qwen2.5:3b
+ * grandes que sean lentos. El modelo ideal: qwen3.5:2b
  */
 function scoreModel(model) {
     const name  = model.name.toLowerCase();
@@ -545,6 +852,9 @@ function selectBestModel(models) {
  * Cache API del navegador. Las veces siguientes se carga desde ahí.
  */
 async function getOnnxSession() {
+    // El vocabulario debe estar disponible antes de generar embeddings.
+    bertVocab = await loadBertVocab(BERT_VOCAB_URL);
+
     if (onnxSession) return onnxSession; // Ya está cargado en memoria
 
     const cache  = await caches.open(ONNX_CACHE_NAME);
@@ -588,15 +898,16 @@ async function downloadOnnxModel() {
  * El popup llama a GET_STATUS para saber qué está disponible.
  */
 async function getSystemStatus() {
-    const ollamaAvailable = (await getOllamaModel()) !== null;
+    const ollamaAvailable = (await getOllamaModel(true)) !== null;
     const cache           = await caches.open(ONNX_CACHE_NAME);
     const onnxCached      = !!(await cache.match(ONNX_CACHE_KEY));
 
     return {
         onnxCached,               // ¿El modelo ONNX está descargado?
+        onnxRuntimeAvailable,     // ¿Está disponible ONNX Runtime Web?
         ollamaAvailable,          // ¿Ollama está corriendo?
         ollamaModel,              // ¿Cuál modelo Ollama usamos?
-        recommendedModel: "qwen2.5:3b",  // Recomendación si no hay Ollama
+        recommendedModel: "qwen3.5:2b",  // Recomendación si no hay Ollama
     };
 }
 
@@ -635,8 +946,10 @@ function estimateTokens(text) {
  */
 try {
     importScripts("lib/ort.min.js");
+    onnxRuntimeAvailable = true;
     console.log("[IAndes BG] ONNX Runtime Web cargado correctamente");
 } catch (e) {
+    onnxRuntimeAvailable = false;
     console.warn("[IAndes BG] ONNX Runtime no disponible (Capa 2 desactivada):", e.message);
     // La Capa 2 quedará deshabilitada, pero el resto del sistema funciona
 }
