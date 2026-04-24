@@ -71,12 +71,17 @@ const CONFIG = {
 };
 
 const IMPROVE_REVIEW_ID = "iandes-improve-review";
+const OPTIMIZE_HINT_ID = "iandes-optimize-hint";
 
 // Variable global que guarda el último texto del campo de prompt
 let textoTemporal = "";
 let lastProcessedPrompt = "";
 let lastProcessedAt = 0;
 let suppressNextScheduledProcess = false;
+let dismissedHintForText = "";
+let pendingOptimizeContext = null;
+let ignoreInputBlurUntil = 0;
+let optimizationTimeoutId = null;
 
 // ---------------------------------------------------------------------------
 // WEB WORKER: conteo de tokens (tiktoken en worker o heurística)
@@ -308,34 +313,42 @@ async function fetchTokenMetrics() {
 
 
 // ---------------------------------------------------------------------------
-// CAPA 1 — Filtro léxico determinista
+// CAPA 1 -FILTRO LÉXICO DETERMINISTA
 // ---------------------------------------------------------------------------
 // Esta capa elimina "ruido conversacional" del prompt: saludos, despedidas,
 // frases de cortesía, etc. Se ejecuta localmente (sin servidor, sin internet).
 
-/** Reglas de la Capa 1 */
+/** Reglas de la Capa 1 (explicitas y trazables) */
 const LAYER1_RULES = {
-    // Categoría A: patrones de ruego/cortesía que pueden aparecer en cualquier posición
-    structural: [
-        /(quisiera|me\s+gustaría|podrías?)\s+(pedirte|solicitarte|preguntarte|que)/gi,
-        /(necesito|quiero)\s+que\s+me\s+(ayudes|expliques|digas|cuentes)/gi,
-        /de\s+forma\s+(muy\s+)?(detallada|exhaustiva|completa|clara\s+y\s+sencilla)/gi,
-        /\bpor\s+favor\b/gi,
-        /\bte\s+pido\s+que\b/gi,
-        /\bsi\s+no\s+es\s+molestia\b/gi,
-        /\bme\s+harías\s+el\s+favor\s+de\b/gi,
-        /\bmuchas\s+gracias\b/gi,
-        /\bgracias\s+de\s+antemano\b/gi,
-        /\bte\s+lo\s+agradezco\b/gi,
-    ],
-    // Categoría B: saludos y despedidas al inicio/fin del mensaje
+    // Señales rápidas para clasificación (Capa 0)
     positional: {
-        // Saludos: solo se eliminan si están al INICIO del texto
-        start: /^(hola|buenos?\s+días?|buenas?\s+tardes?|espero\s+que\s+estés?\s+bien)[,.]?\s*/i,
-        // Despedidas: solo se eliminan si están al FINAL del texto
-        end:   /\s*(muchas\s+gracias|gracias\s+de\s+antemano|te\s+lo\s+agradezco)[.!]?\s*$/i,
+        start: /^(?:hola|hey|ey|saludos|buen(?:os?|as?)\s+d[ií]as|buen(?:os?|as?)\s+tardes|buen(?:os?|as?)\s+noches|estimad[oa]|espero\s+que\s+est[eé]s?\s+bien)[,.:;\-\s]*/i,
+        end:   /[\s,.;:!?-]*(?:gracias(?:\s+de\s+antemano)?|muchas\s+gracias|te\s+lo\s+agradezco|quedo\s+atent[oa])[\s,.;:!?-]*$/i,
     },
+
+    // Catálogo detallado para aplicar y explicar reglas
+    catalog: [
+        { id: "start_greeting", label: "Saludo inicial", scope: "inicio", regex: /^(?:hola|hey|ey|saludos|buen(?:os?|as?)\s+d[ií]as|buen(?:os?|as?)\s+tardes|buen(?:os?|as?)\s+noches|estimad[oa])[,.:;\-\s]*/i },
+        { id: "start_wellbeing", label: "Frase de cortesía inicial", scope: "inicio", regex: /^(?:espero\s+que\s+est[eé]s?\s+bien|c[oó]mo\s+est[aá]s)[,.:;\-\s]*/i },
+        { id: "end_thanks", label: "Agradecimiento final", scope: "final", regex: /[\s,.;:!?-]*(?:gracias(?:\s+de\s+antemano)?|muchas\s+gracias|te\s+lo\s+agradezco|quedo\s+atent[oa])[\s,.;:!?-]*$/i },
+
+        { id: "ask_permission", label: "Fórmula de ruego", scope: "global", regex: /\b(?:quisiera|me\s+gustar[ií]a|te\s+quer[ií]a\s+pedir|te\s+pido\s+que|si\s+no\s+es\s+molestia|me\s+har[ií]as\s+el\s+favor\s+de|te\s+agradecer[ií]a\s+si)\b/gi },
+        { id: "please", label: "Cortesía explícita", scope: "global", regex: /\b(?:por\s+favor|porfa|si\s+puedes|si\s+es\s+posible)\b/gi },
+        { id: "assist_request", label: "Solicitud indirecta", scope: "global", regex: /\b(?:podr[ií]as?|puedes?)\s+(?:ayudarme|apoyarme|explicarme|resumirme|darme)\b/gi },
+        { id: "need_help", label: "Petición redundante de ayuda", scope: "global", regex: /\b(?:necesito|quiero)\s+que\s+me\s+(?:ayudes|expliques|digas|cuentes|resumas)\b/gi },
+        { id: "verbosity_request", label: "Pedida de verbosidad", scope: "global", regex: /\bde\s+forma\s+(?:muy\s+)?(?:detallada|exhaustiva|completa|clara\s+y\s+sencilla)\b/gi },
+        { id: "transition_filler", label: "Muletilla de transición", scope: "global", regex: /\b(?:a\s+continuaci[oó]n|antes\s+que\s+nada|primero\s+que\s+todo)\b/gi },
+    ],
 };
+
+function getLayer1RulesCatalog() {
+    return LAYER1_RULES.catalog.map(rule => ({
+        id: rule.id,
+        label: rule.label,
+        scope: rule.scope,
+        pattern: String(rule.regex),
+    }));
+}
 
 /**
  * Aplica el filtro léxico (Capa 1) al texto.
@@ -345,20 +358,55 @@ const LAYER1_RULES = {
  * Cuando haya duda, NO eliminar.
  */
 function applyLayer1(text) {
-    let result = text;
+    return applyLayer1Detailed(text).text;
+}
 
-    // Primero: eliminar saludos y despedidas posicionales
-    result = result.replace(LAYER1_RULES.positional.start, "");
-    result = result.replace(LAYER1_RULES.positional.end, "");
+function applyLayer1Detailed(text) {
+    let result = String(text || "");
+    const matchedRules = [];
+    const matchedFragments = [];
+    const applied = new Set();
 
-    // Luego: eliminar patrones estructurales de cortesía
-    for (const regex of LAYER1_RULES.structural) {
-        result = result.replace(regex, "");
+    function applyRule(rule) {
+        const next = result.replace(rule.regex, (match) => {
+            const fragment = String(match || "").trim();
+            if (fragment) matchedFragments.push(fragment);
+            return "";
+        });
+
+        if (next !== result) {
+            result = next;
+            if (!applied.has(rule.id)) {
+                applied.add(rule.id);
+                matchedRules.push({ id: rule.id, label: rule.label, scope: rule.scope });
+            }
+        }
     }
 
-    // Limpiar espacios múltiples y líneas vacías extra
-    result = result.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-    return result;
+    const looksLikeCode = /```[\s\S]*?```|^\s{4}[\w]|^\t[\w]/m.test(text) ||
+        /\b(function|const|let|var|class|def |import |#include)\b/.test(text);
+
+    for (const rule of LAYER1_RULES.catalog) {
+        // Si parece código, saltear reglas globales
+        if (looksLikeCode && rule.scope === 'global') continue;
+        applyRule(rule);
+    }
+
+    result = result
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/^\s*[,.;:!?-]+\s*/g, "")
+        .trim();
+
+    const savedTokens = Math.max(0, estimateTokensLocally(text) - estimateTokensLocally(result));
+    const uniqueFragments = [...new Set(matchedFragments)].slice(0, 5);
+
+    return {
+        text: result,
+        savedTokens,
+        matchedRules,
+        matchedFragments: uniqueFragments,
+    };
 }
 
 
@@ -401,12 +449,16 @@ function classifyPrompt(text) {
 
     // ---- Clasificación ----
 
+    if (wordCount < 15 && hasCourtesy) {
+        // Prompt corto CON cortesía → Capa 1 siempre, Capa 3 si hay Ollama para mejorar
+        return { profile: "short_with_courtesy", layers: [1, 3] };
+    }
     if (wordCount < 15 && !hasCourtesy) {
         // Prompt corto y directo → solo necesita reformulación (Capa 3)
         return { profile: "short_vague", layers: [3] };
     }
-    if (wordCount >= 15 && hasCourtesy && functionalRatio > 0.25) {
-        // Prompt largo con relleno → pipeline completo
+    if (wordCount >= 15 && hasCourtesy) {
+        // Prompt largo con cortesía → pipeline completo independiente del ratio funcional
         return { profile: "long_padded", layers: [1, 2, 3] };
     }
     if (wordCount >= 15 && hasStructure && !hasCourtesy) {
@@ -502,6 +554,42 @@ function renderOverlayError(message) {
     overlay.style.opacity = "1";
 }
 
+function renderOverlaySuccess(message) {
+    const overlay = getOrCreateOverlay();
+    overlay.onclick = null;
+    overlay.title = "";
+    overlay.style.pointerEvents = "none";
+    overlay.style.cursor = "default";
+    overlay.style.userSelect = "none";
+    overlay.innerHTML = `
+        <div style="color:#00e696;font-weight:700;letter-spacing:0.05em;margin-bottom:5px;">
+            ▸ IAndes
+        </div>
+        <div style="color:#e0ffe8;line-height:1.55;">
+            ${escapeHtml(message)}
+        </div>
+    `;
+    overlay.style.opacity = "1";
+}
+
+function renderOverlayInfo(message) {
+    const overlay = getOrCreateOverlay();
+    overlay.onclick = null;
+    overlay.title = "";
+    overlay.style.pointerEvents = "none";
+    overlay.style.cursor = "default";
+    overlay.style.userSelect = "none";
+    overlay.innerHTML = `
+        <div style="color:#4dabf7;font-weight:700;letter-spacing:0.05em;margin-bottom:5px;">
+            ▸ IAndes
+        </div>
+        <div style="color:#e0ffe8;line-height:1.55;">
+            ${escapeHtml(message)}
+        </div>
+    `;
+    overlay.style.opacity = "1";
+}
+
 /**
  * Actualiza el contenido del overlay con los datos de métricas.
  *
@@ -555,6 +643,201 @@ function hideOverlay() {
     }
 }
 
+function markIgnoreInputBlur(ms = 300) {
+    ignoreInputBlurUntil = Date.now() + ms;
+}
+
+function isIAndesUiElement(node) {
+    if (!node || typeof node.closest !== "function") return false;
+    return Boolean(
+        node.closest(`#${IMPROVE_REVIEW_ID}`) ||
+        node.closest(`#${OPTIMIZE_HINT_ID}`) ||
+        node.closest(`#${CONFIG.overlayId}`)
+    );
+}
+
+function normalizePromptKey(text) {
+    return String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function readCurrentPromptText(preferredEl = null) {
+    if (preferredEl) {
+        try {
+            return preferredEl.value !== undefined
+                ? preferredEl.value
+                : (preferredEl.innerText || preferredEl.textContent || "");
+        } catch {}
+    }
+
+    const inputs = getChatInputs();
+    const targetEl = inputs.find(el => el === document.activeElement) || inputs[0];
+    if (!targetEl) return "";
+    return targetEl.value !== undefined
+        ? targetEl.value
+        : (targetEl.innerText || targetEl.textContent || "");
+}
+
+function getOrCreateOptimizeHint() {
+    let hint = document.getElementById(OPTIMIZE_HINT_ID);
+    if (!hint) {
+        hint = document.createElement("div");
+        hint.id = OPTIMIZE_HINT_ID;
+        hint.style.cssText = `
+            position: fixed;
+            left: 0;
+            top: 0;
+            z-index: 2147483646;
+            max-width: min(340px, calc(100vw - 24px));
+            background: rgba(11, 16, 26, 0.96);
+            border: 1px solid rgba(0, 230, 150, 0.26);
+            border-radius: 8px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+            backdrop-filter: blur(8px);
+            color: #dff5e8;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 10px;
+            line-height: 1.35;
+            padding: 7px 8px;
+            pointer-events: auto;
+        `;
+        hint.addEventListener("pointerdown", () => markIgnoreInputBlur(), true);
+        hint.addEventListener("mousedown", () => markIgnoreInputBlur(), true);
+        document.body.appendChild(hint);
+    }
+    return hint;
+}
+
+function positionOptimizeHintNearInput(hint, anchorEl) {
+    if (!hint || !anchorEl) return;
+    try {
+        const rect       = anchorEl.getBoundingClientRect();
+        const hintHeight = hint.offsetHeight || 80;
+        const hintWidth  = hint.offsetWidth  || 300;
+        const margin = 8;
+
+        // Preferir: derecha del input → izquierda del input → debajo del input → arriba del input
+        let left = rect.right + margin;
+        let top  = rect.top - hintHeight - margin;
+
+        if (left + hintWidth > window.innerWidth - 8) {
+            left = Math.max(8, rect.left - hintWidth - margin);
+        }
+        if (top < 8) {
+            top = rect.bottom + margin;
+        }
+
+        top  = Math.max(8, Math.min(top,  window.innerHeight - hintHeight - 8));
+        left = Math.max(8, Math.min(left, window.innerWidth  - hintWidth  - 8));
+
+        hint.style.top      = `${Math.round(top)}px`;
+        hint.style.left     = `${Math.round(left)}px`;
+        hint.style.opacity  = "1";
+        hint.style.display  = "block";
+    } catch (e) {
+        // Fallback centrado
+        hint.style.top      = "50%";
+        hint.style.left     = "50%";
+        hint.style.transform = "translate(-50%, -50%)";
+        hint.style.opacity  = "1";
+        hint.style.display  = "block";
+    }
+}
+
+function hideOptimizeHint() {
+    pendingOptimizeContext = null;
+    const hint = document.getElementById(OPTIMIZE_HINT_ID);
+    if (hint) hint.remove();
+}
+
+function showOptimizeHint({ text, mode, sourceElement }) {
+    const normalized = normalizePromptKey(text);
+    if (!normalized || dismissedHintForText === normalized) return;
+
+    const actionVerb   = mode === "improve" ? "mejorar" : "comprimir";
+    const actionQuestion = mode === "improve" ? "¿Mejorar?" : "¿Comprimir?";
+    pendingOptimizeContext = { text, mode, sourceElement: sourceElement || null, normalized };
+
+    // Limpiar hint previo si existe
+    const existing = document.getElementById(OPTIMIZE_HINT_ID);
+    if (existing) existing.remove();
+
+    // Crear hint con contenido HTML completo desde el inicio
+    const hint = document.createElement("div");
+    hint.id = OPTIMIZE_HINT_ID;
+    hint.style.cssText = `
+        position: fixed;
+        left: -9999px;
+        top: -9999px;
+        z-index: 2147483646;
+        max-width: min(340px, calc(100vw - 24px));
+        background: rgba(11, 16, 26, 0.97);
+        border: 1px solid rgba(0, 230, 150, 0.3);
+        border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        backdrop-filter: blur(8px);
+        color: #dff5e8;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: 10px;
+        line-height: 1.35;
+        padding: 8px 10px;
+        pointer-events: auto;
+        white-space: normal;
+    `;
+
+    // Construir HTML completo y establecerlo ANTES de appendChild
+    // para que los elementos estén listos cuando se posicionen
+    hint.innerHTML = `
+        <div style="color:#e7fff0;margin-bottom:5px;">
+            (!)&nbsp;Prompt ${escapeHtml(actionVerb)}:
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span style="color:#9bc6ae;">${escapeHtml(actionQuestion)}</span>
+            <button id="iandes-hint-yes"
+                    style="border:1px solid rgba(0,230,150,0.58);background:rgba(0,230,150,0.12);color:#00e696;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:10px;"
+                    data-action="yes">si</button>
+            <button id="iandes-hint-no"
+                    style="border:1px solid rgba(255,255,255,0.2);background:transparent;color:#d8e8df;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:10px;"
+                    data-action="no">no</button>
+        </div>
+    `;
+
+    // Solo ahora appendChild — el DOM interno ya está listo
+    document.body.appendChild(hint);
+
+    // Exponer handlers en window ANTES de que se haga clic
+    window.__iandes_hint_yes_fn = () => {
+        const ctx = pendingOptimizeContext;
+        const currentText = readCurrentPromptText(ctx?.sourceElement || null);
+        dismissedHintForText = ctx?.normalized || normalizePromptKey(currentText);
+        hint.remove();
+        pendingOptimizeContext = null;
+        Promise.resolve(processPrompt(currentText, {
+            autoApply: true,
+            force: true,
+            sourceElement: ctx?.sourceElement || null,
+        })).catch(err => console.warn("[IAndes] processPrompt failed:", err));
+    };
+
+    window.__iandes_hint_no_fn = () => {
+        dismissedHintForText = normalized;
+        hint.remove();
+        pendingOptimizeContext = null;
+    };
+
+    // Delegar click al body (más confiable que onclick inline)
+    hint.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-action]");
+        if (!btn) return;
+        const action = btn.getAttribute("data-action");
+        if (action === "yes") window.__iandes_hint_yes_fn();
+        if (action === "no")  window.__iandes_hint_no_fn();
+    });
+
+    // Posicionar DESPUÉS de que el DOM interno existe y tiene dimensiones
+    const anchor = sourceElement || document.activeElement || document.querySelector("textarea");
+    positionOptimizeHintNearInput(hint, anchor);
+}
+
 // [FIX-CONTEXT] Mostrar aviso en overlay cuando el content script quedó invalidado.
 function showContextInvalidatedOverlay() {
     const overlay = getOrCreateOverlay();
@@ -596,6 +879,8 @@ function getOrCreateImproveReviewPanel() {
             font-size: 11px;
             padding: 12px;
         `;
+        panel.addEventListener("pointerdown", () => markIgnoreInputBlur(), true);
+        panel.addEventListener("mousedown", () => markIgnoreInputBlur(), true);
         document.body.appendChild(panel);
     }
     return panel;
@@ -704,12 +989,16 @@ function renderImproveReviewPanel(originalText, improvedText, stats) {
     applyBtn?.addEventListener("click", () => {
         hideImproveReviewPanel();
         injectOptimizedPrompt(improvedText, stats, "improve");
-        renderOverlayError("Mejora aplicada. Puedes seguir editando o enviar.");
+        renderOverlaySuccess("Mejora aplicada. Puedes seguir editando o enviar.");
     });
 
     discardBtn?.addEventListener("click", () => {
         hideImproveReviewPanel();
-        renderOverlayError("Mejora descartada. El prompt original se mantiene.");
+        if (window.__iandes) {
+            renderOverlay(window.__iandes);
+        } else {
+            hideOverlay();
+        }
     });
 }
 
@@ -728,19 +1017,23 @@ function isImproveResultMessage(msg) {
  * Función principal que se llama cada vez que el usuario deja de escribir.
  *
  * Flujo:
- *   1. Mostrar estimación local inmediata (respuesta visual instantánea)
- *   2. Pedir al servidor el conteo exacto con el proveedor correcto
- *   3. Actualizar el overlay con los datos reales
- *   4. Clasificar el prompt (Capa 0)
- *   5. Aplicar filtro léxico si corresponde (Capa 1)
- *   6. Enviar al Service Worker para Capas 2 y 3
+ *   1. Mostrar estimación local inmediata
+ *   2. Refinar conteo con Worker (si disponible)
+ *   3. Clasificar el prompt (Capa 0)
+ *   4. Analizar filtro léxico (Capa 1) y sugerir optimización
+ *   5. Solo si el usuario confirma, aplicar cambios y delegar Capas 2/3
  * 
  * [FASE 4] Leer el modo una sola vez y enviarlo con el request al background.
  */
-async function processPrompt(text) {
+async function processPrompt(text, options = {}) {
+    const autoApply = options.autoApply === true;
+    const force = options.force === true;
+    const sourceElement = options.sourceElement || null;
+
     if (!text || !text.trim()) {
         hideOverlay();
         hideImproveReviewPanel();
+        hideOptimizeHint();
         return;
     }
 
@@ -748,8 +1041,11 @@ async function processPrompt(text) {
 
     // Evitar procesar varias veces el mismo texto en una ventana corta.
     const normalizedText = text.trim();
+    if (dismissedHintForText && dismissedHintForText !== normalizePromptKey(normalizedText)) {
+        dismissedHintForText = "";
+    }
     const now = Date.now();
-    if (normalizedText === lastProcessedPrompt && now - lastProcessedAt < 1200) {
+    if (!force && normalizedText === lastProcessedPrompt && now - lastProcessedAt < 1200) {
         return;
     }
     lastProcessedPrompt = normalizedText;
@@ -774,6 +1070,7 @@ async function processPrompt(text) {
     // Guardar en window para que el popup y devtools puedan acceder
     try {
         window.__iandes = {
+            ...(window.__iandes || {}),
             ...impact,
             text,
             provider: PROVIDER.id,
@@ -802,6 +1099,7 @@ async function processPrompt(text) {
                     });
                     try {
                         window.__iandes = {
+                            ...(window.__iandes || {}),
                             ...impact2,
                             text,
                             provider: PROVIDER.id,
@@ -846,6 +1144,7 @@ async function processPrompt(text) {
             }
         } else if (classification.layers.length === 0) {
             // Si el prompt ya es óptimo y modo es 'compress', no hacer nada.
+            hideOptimizeHint();
             console.log("[IAndes] Prompt ya óptimo, sin transformación");
             return;
         }
@@ -861,22 +1160,73 @@ async function processPrompt(text) {
 
     // Si el prompt ya es óptimo y modo es 'compress', no hacer nada
     if (finalLayers.length === 0) {
+        hideOptimizeHint();
         console.log("[IAndes] Prompt ya óptimo, sin transformación");
         return;
     }
 
     // --- PASO 4: Aplicar Capa 1 (filtro léxico) si está en el pipeline ---
     let optimizedText = text;
+    let layer1Details = {
+        text,
+        savedTokens: 0,
+        matchedRules: [],
+        matchedFragments: [],
+    };
+
     if (mode !== 'improve' && finalLayers.includes(1)) {
-        optimizedText = applyLayer1(text);
-        const savedTokens = estimateTokensLocally(text) - estimateTokensLocally(optimizedText);
-        if (savedTokens > 0) {
-            console.log(`[IAndes] Capa 1: eliminadas ~${savedTokens} tokens de cortesía`);
+        layer1Details = applyLayer1Detailed(text);
+        optimizedText = layer1Details.text;
+        // NUEVO: si Capa 1 dejó el texto vacío, no hacer nada
+        if (!optimizedText.trim()) {
+            hideOptimizeHint();
+            console.log("[IAndes] Capa 1 dejó el texto vacío — abortando optimización");
+            return;
+        }
+        if (layer1Details.savedTokens > 0) {
+            const labels = layer1Details.matchedRules.map(r => r.label).slice(0, 3).join(", ");
+            console.log(`[IAndes] Capa 1: eliminadas ~${layer1Details.savedTokens} tokens | reglas: ${labels || "n/d"}`);
         }
     }
 
+    try {
+        window.__iandes = {
+            ...(window.__iandes || {}),
+            layer1_debug: {
+                saved_tokens: layer1Details.savedTokens,
+                matched_rules: layer1Details.matchedRules,
+                matched_fragments: layer1Details.matchedFragments,
+                rules_catalog: getLayer1RulesCatalog(),
+            },
+        };
+    } catch {}
+
+    // Modo no invasivo: al tipear solo sugerimos, no reemplazamos automáticamente.
+    if (!autoApply) {
+        // Umbral: mostrar hint si hay ahorro de al menos 3 tokens (1 palabra de cortesía)
+        // o si el modo es 'improve' (siempre sugerir mejora)
+        if (mode === 'improve' || layer1Details.savedTokens >= 3) {
+            showOptimizeHint({
+                text,
+                mode,
+                sourceElement,
+            });
+        } else {
+            hideOptimizeHint();
+        }
+        return;
+    }
+
+    hideOptimizeHint();
+
+    // En ejecución manual, aplicar Capa 1 de inmediato para que el usuario vea el cambio.
+    if (mode !== 'improve' && finalLayers.includes(1) && optimizedText.trim() !== text.trim()) {
+        injectOptimizedPrompt(optimizedText, null, mode);
+    }
+
     // --- PASO 5: Delegar Capas 2+3 al Service Worker ---
-    if (finalLayers.includes(2) || finalLayers.includes(3)) {
+    const shouldDelegate = finalLayers.includes(2) || finalLayers.includes(3);
+    if (shouldDelegate) {
         if (CONFIG.localOnlyMode) {
             console.info('[IAndes] localOnlyMode: no delegando Capas 2+3 al Service Worker');
         } else {
@@ -886,15 +1236,29 @@ async function processPrompt(text) {
                     throw new Error('Extension context invalidated');
                 }
 
+                renderOverlayInfo("Procesando optimización con IA avanzada... ⏳");
+
                 // Actualizar classification.layers con el valor final
                 const updatedClassification = { ...classification, layers: finalLayers };
+                
+                clearTimeout(optimizationTimeoutId);
+                optimizationTimeoutId = setTimeout(() => {
+                    optimizationTimeoutId = null;
+                    renderOverlayError("Pipeline sin respuesta. Revisa si Ollama está activo.");
+                }, 20000);
+
                 chrome.runtime.sendMessage(
                     {
                         type:           "OPTIMIZE_PROMPT",
                         text:           optimizedText,
+                        originalText:   text,
                         classification: updatedClassification,
                         mode,
                         provider:       PROVIDER.id,  // El SW también necesita saber el proveedor
+                        layer1Stats:    layer1Details.savedTokens > 0 ? {
+                            savedTokens: layer1Details.savedTokens,
+                            matchedRules: layer1Details.matchedRules
+                        } : null
                     },
                     () => {
                         if (chrome.runtime.lastError) {
@@ -935,7 +1299,16 @@ const INPUT_SELECTOR = [
 
 /** Retorna todos los campos de texto visibles en la página */
 function getChatInputs() {
-    return Array.from(document.querySelectorAll(INPUT_SELECTOR));
+    const all = Array.from(document.querySelectorAll(INPUT_SELECTOR));
+    return all.filter(el => {
+        try {
+            const rect = el.getBoundingClientRect();
+            // Filtrar elementos muy pequeños o fuera de viewport
+            return rect.width > 80 && rect.height > 24 && rect.top < window.innerHeight;
+        } catch {
+            return false;
+        }
+    });
 }
 
 /**
@@ -967,14 +1340,17 @@ function attachListener(el) {
     let debounceTimer = null;
 
     // [FIX-CONTEXT] Ejecutar processPrompt solo si el contexto de extensión sigue vivo.
-    function runProcessPromptSafely() {
+    function runProcessPromptSafely(options = { autoApply: false }) {
         if (!chrome.runtime?.id) {
             showContextInvalidatedOverlay();
             return;
         }
 
         textoTemporal = readValue();
-        Promise.resolve(processPrompt(textoTemporal)).catch((err) => {
+        Promise.resolve(processPrompt(textoTemporal, {
+            ...options,
+            sourceElement: el,
+        })).catch((err) => {
             const message = String(err?.message || err || '');
             if (message.toLowerCase().includes('invalidated')) {
                 console.warn('[IAndes] Extension recargada — recarga la página para continuar');
@@ -995,7 +1371,7 @@ function attachListener(el) {
         clearTimeout(debounceTimer);
         // Programar uno nuevo
         debounceTimer = setTimeout(() => {
-            runProcessPromptSafely();
+            runProcessPromptSafely({ autoApply: false });
         }, delayMs);
     }
 
@@ -1012,10 +1388,15 @@ function attachListener(el) {
         }
     });
 
-    // Al perder el foco → procesar inmediatamente (sin esperar el debounce)
-    el.addEventListener("blur", () => {
+    // Al perder el foco → procesar solo si el texto cambió desde el último procesamiento
+    el.addEventListener("blur", (event) => {
+        if (Date.now() < ignoreInputBlurUntil) return;
+        if (isIAndesUiElement(event.relatedTarget)) return;
+        const currentVal = readValue().trim();
+        // Evitar re-procesar si el texto no cambió desde el último ciclo
+        if (currentVal === lastProcessedPrompt) return;
         clearTimeout(debounceTimer);
-        runProcessPromptSafely();
+        runProcessPromptSafely({ autoApply: false });
     });
 }
 
@@ -1033,6 +1414,9 @@ function attachListener(el) {
  */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "OPTIMIZED_PROMPT") {
+        clearTimeout(optimizationTimeoutId);
+        optimizationTimeoutId = null;
+        hideOptimizeHint();
         if (isImproveResultMessage(msg)) {
             renderImproveReviewPanel(msg.originalText || textoTemporal || "", msg.text, msg.stats || {});
         } else {
@@ -1042,14 +1426,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "OPTIMIZATION_INFO") {
-        renderOverlayError(msg.message || "No se aplicaron cambios.");
+        clearTimeout(optimizationTimeoutId);
+        optimizationTimeoutId = null;
+        hideOptimizeHint();
+        renderOverlayInfo(msg.message || "No se aplicaron cambios.");
         return;
     }
 
     if (msg.type === "OPTIMIZATION_ERROR") {
+        clearTimeout(optimizationTimeoutId);
+        optimizationTimeoutId = null;
+        hideOptimizeHint();
         renderOverlayError(msg.message || "Modo Mejorar requiere Ollama. Ver popup →");
         return;
     }
+
+    if (msg.type === "OPTIMIZATION_COMPLETE") {
+        clearTimeout(optimizationTimeoutId);
+        optimizationTimeoutId = null;
+        hideOptimizeHint();
+        const label = msg.stats?.savedTokens > 0
+            ? `-${msg.stats.savedTokens} tokens ahorrados`
+            : "Prompt limpiado";
+        renderOverlaySuccess(`✓ ${label}`);
+        setTimeout(() => {
+            if (window.__iandes) renderOverlay(window.__iandes);
+        }, 3500);
+        return;
+    }
+
     // El popup puede pedirle las métricas actuales al content script
     // MODIFICADO: usar sendResponse() en lugar de return
     if (msg.type === "GET_METRICS") {
@@ -1065,36 +1470,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  * @param {object} stats   - Estadísticas de ahorro (opcional)
  */
 function injectOptimizedPrompt(newText, stats, mode = "compress") {
+    hideOptimizeHint();
+    dismissedHintForText = "";
+
     const inputs = getChatInputs();
-    // Preferir el campo que tiene el foco; si ninguno, usar el primero
     const targetEl = inputs.find(el => el === document.activeElement) || inputs[0];
-    if (!targetEl) return;
+    
+    if (targetEl) {
+        const currentText = targetEl.value !== undefined
+            ? targetEl.value
+            : (targetEl.innerText || targetEl.textContent || "");
 
-    const currentText = targetEl.value !== undefined
-        ? targetEl.value
-        : (targetEl.innerText || targetEl.textContent || "");
-
-    if ((currentText || "").trim() === (newText || "").trim()) {
-        return;
+        if ((currentText || "").trim() !== (newText || "").trim()) {
+            suppressNextScheduledProcess = true;
+            if (targetEl.value !== undefined) {
+                targetEl.value = newText;
+                targetEl.dispatchEvent(new Event("input", { bubbles: true }));
+            } else {
+                targetEl.innerText = newText;
+                targetEl.dispatchEvent(new InputEvent("input", { bubbles: true }));
+            }
+        }
     }
 
-    // Evita re-procesar inmediatamente el mismo texto por el evento input sintético.
-    suppressNextScheduledProcess = true;
-
-    // Inyectar el texto según el tipo de campo
-    if (targetEl.value !== undefined) {
-        // Es un <textarea>
-        targetEl.value = newText;
-        targetEl.dispatchEvent(new Event("input", { bubbles: true }));
-    } else {
-        // Es un div contenteditable
-        targetEl.innerText = newText;
-        targetEl.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    }
-
+    // SIEMPRE actualizar el overlay, haya o no inyección
     if (stats) {
-        console.log(`[IAndes] ✓ Optimización completa: −${stats.savedTokens} tokens (${stats.savedPct}%)`);
+        const savedLabel = (stats.savedTokens > 0)
+            ? `-${stats.savedTokens} tokens ahorrados`
+            : "Prompt limpiado";
+        console.log(`[IAndes] ✓ Optimización: ${savedLabel}`);
         persistSessionStats(stats, mode);
+        renderOverlaySuccess(`✓ ${savedLabel}`);
+        setTimeout(() => {
+            if (window.__iandes) renderOverlay(window.__iandes);
+        }, 3500);
     }
 }
 
@@ -1133,5 +1542,10 @@ const domObserver = new MutationObserver((mutations) => {
 
 // Observar todo el body, incluyendo subárboles (subtree: true)
 domObserver.observe(document.body, { childList: true, subtree: true });
+
+try {
+    window.__iandes_rulebook = getLayer1RulesCatalog();
+    console.info("[IAndes] Reglas Capa 1 cargadas:", window.__iandes_rulebook);
+} catch {}
 
 console.log(`[IAndes] Content Script v3.0 iniciado · Proveedor: ${PROVIDER.name}`);

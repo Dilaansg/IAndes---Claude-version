@@ -31,6 +31,7 @@ Extension MV3 para optimizar prompts localmente en chats de IA (ChatGPT, Claude,
 - `background.js`: pipeline pesado (ONNX, scoring de Ollama, mejora/compresion).
 - `popup.html` + `popup.js`: estado del sistema, modo activo, banner de Ollama, resumen de sesion.
 - `token_worker.js`: conteo de tokens en worker con fallback heuristico.
+- `REGLAS_CAPA1.md`: catalogo explicito de reglas de limpieza lexico-determinista.
 
 ## Requisitos
 
@@ -59,7 +60,9 @@ ollama pull qwen3.5:2b
 1. Cargar la extension en modo desarrollador (`chrome://extensions` -> Load unpacked).
 2. Abrir ChatGPT, Claude o Gemini.
 3. Escribir un prompt y dejar de tipear.
-4. En modo mejorar, revisar cambios y elegir:
+4. IAndes mostrara una alerta minima no invasiva cuando detecte oportunidad de optimizacion.
+5. Presionar `Optimizar` o `Mejorar` para ejecutar el pipeline manualmente.
+6. En modo mejorar, revisar cambios y elegir:
    - Aceptar y reemplazar
    - Descartar
 

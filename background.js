@@ -129,12 +129,26 @@ let onnxRuntimeAvailable = false;
  */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
+    if (msg.type === "PING") {
+        sendResponse({ ok: true });
+        return false;
+    }
+
     if (msg.type === "OPTIMIZE_PROMPT") {
         // [FIX-MSG] Responder inmediatamente para cerrar el canal del mensaje.
         sendResponse({ ok: true });
         // Ejecutar el pipeline de optimización en segundo plano
-        handleOptimization(msg.text, msg.classification, sender.tab?.id, msg.mode)
-            .catch(err => console.error("[IAndes BG] Error en pipeline:", err));
+        handleOptimization(msg.text, msg.classification, sender.tab?.id, msg.mode, msg.originalText, msg.layer1Stats)
+            .catch(err => {
+                console.error("[IAndes BG] Error en pipeline:", err);
+                if (sender.tab?.id) {
+                    chrome.tabs.sendMessage(sender.tab.id, {
+                        type: "OPTIMIZATION_INFO",
+                        mode: msg.mode,
+                        message: "Error al procesar la optimización.",
+                    });
+                }
+            });
         // [FIX-MSG] El canal ya quedó cerrado arriba.
         return false;
     }
@@ -180,11 +194,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  * @param {number} tabId          - ID de la pestaña para devolver el resultado
  * @param {string} mode           - Modo de operación: 'compress' | 'improve'
  */
-async function handleOptimization(text, classification, tabId, mode = 'compress') {
+async function handleOptimization(text, classification, tabId, mode = 'compress', originalText = null, layer1Stats = null) {
     let result = text;
+    const trueOriginalText = originalText || text;
     const stats = {
-        originalTokens: estimateTokens(text),
-        layers: [],   // Qué capas se activaron realmente
+        originalTokens: estimateTokens(trueOriginalText),
+        layers: layer1Stats ? ["layer1"] : [],   // Qué capas se activaron realmente
     };
     console.log(`[IAndes BG] Modo de operación: ${mode}`);
 
@@ -269,18 +284,33 @@ async function handleOptimization(text, classification, tabId, mode = 'compress'
         }
     }
 
-    // Si el texto cambió, enviarlo de vuelta al Content Script para inyectarlo
-    if (result !== text && tabId) {
-        const finalTokens    = estimateTokens(result);
-        stats.savedTokens    = stats.originalTokens - finalTokens;
-        stats.savedPct       = Math.round((stats.savedTokens / stats.originalTokens) * 100);
-
+    // Si el texto cambió en capas 2/3 O si la capa 1 hizo cambios
+    const capas23Changed = result !== text;
+    if (capas23Changed && tabId) {
+        const finalTokens = estimateTokens(result);
+        stats.savedTokens = stats.originalTokens - finalTokens;
+        stats.savedPct = Math.round((stats.savedTokens / stats.originalTokens) * 100);
         chrome.tabs.sendMessage(tabId, {
-            type:  "OPTIMIZED_PROMPT",
-            text:  result,
+            type: "OPTIMIZED_PROMPT",
+            text: result,
             stats,
             mode,
-            originalText: text,
+            originalText: trueOriginalText,
+        });
+    } else if (tabId) {
+        // Las Capas 2+3 no cambiaron nada. Content.js ya aplicó Capa 1.
+        const layer1SavedTokens = layer1Stats?.savedTokens || 0;
+        chrome.tabs.sendMessage(tabId, {
+            type: "OPTIMIZATION_COMPLETE",
+            stats: {
+                savedTokens: layer1SavedTokens,
+                savedPct: layer1SavedTokens > 0
+                    ? Math.round((layer1SavedTokens / stats.originalTokens) * 100)
+                    : 0,
+                originalTokens: stats.originalTokens,
+                layers: stats.layers,
+            },
+            mode,
         });
     }
 }
@@ -393,6 +423,9 @@ function applyImproveTemplate(text, analysis) {
  * @returns {string} - El texto sin redundancias
  */
 async function layer2Deduplicate(text) {
+    if (!onnxRuntimeAvailable) {
+        throw new Error("ONNX Runtime no disponible — Capa 2 desactivada");
+    }
     const session = await getOnnxSession();
     if (!session) throw new Error("Modelo ONNX no disponible");
 
@@ -490,10 +523,15 @@ async function computeEmbedding(session, text) {
     const attentionMask = inputIds.map(id => (id === 0 ? 0 : 1));
 
     // Paso 2: Preparar los tensores de entrada para el modelo
+    // Usar Int32Array en lugar de BigInt64Array para compatibilidad universal
+    const intInputIds      = new Int32Array(inputIds);
+    const intAttentionMask = new Int32Array(attentionMask);
+    const intTokenTypeIds  = new Int32Array(inputIds.length).fill(0);
+
     const feeds = {
-        input_ids:      new ort.Tensor("int64", BigInt64Array.from(inputIds.map(BigInt)), [1, inputIds.length]),
-        attention_mask: new ort.Tensor("int64", BigInt64Array.from(attentionMask.map(BigInt)), [1, inputIds.length]),
-        token_type_ids: new ort.Tensor("int64", new BigInt64Array(inputIds.length).fill(0n), [1, inputIds.length]),
+        input_ids:      new ort.Tensor("int32", intInputIds,      [1, inputIds.length]),
+        attention_mask: new ort.Tensor("int32", intAttentionMask, [1, inputIds.length]),
+        token_type_ids: new ort.Tensor("int32", intTokenTypeIds,  [1, inputIds.length]),
     };
 
     // Paso 3: Ejecutar el modelo ONNX
