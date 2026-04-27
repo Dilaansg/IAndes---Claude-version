@@ -46,6 +46,9 @@ function detectProvider() {
     if (url.includes("gemini.google.com")) {
         return { id: "gemini",  name: "Gemini",    model: "gemini-2.0-flash" };
     }
+    if(url.includes("copilot.microsoft.com")){
+        return {id: "copilot", name: "Copilot",    model: "gpt-4o"}
+    }
 
     // Si no reconocemos la URL, usamos ChatGPT/tiktoken como fallback
     // (es el método que funciona sin API key)

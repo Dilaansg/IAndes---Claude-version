@@ -14,10 +14,7 @@
     "*://chat.openai.com/*",
     "*://chatgpt.com/*",
     "*://claude.ai/*",
-    "*://gemini.google.com/*",
-    "https://huggingface.co/*",
-    "http://localhost:11434/*",
-    "http://127.0.0.1:11434/*"
+    "*://gemini.google.com/*"
   ],
 
   "background": {
@@ -30,9 +27,10 @@
         "*://chat.openai.com/*",
         "*://chatgpt.com/*",
         "*://claude.ai/*",
-        "*://gemini.google.com/*"
+        "*://gemini.google.com/*",
+        "*://copilot.microsoft.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["floating_panel.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
@@ -44,7 +42,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["lib/ort.min.js","token_worker.js"],
+      "resources": ["lib/ort.min.js","token_worker.js","popup.html","popup.js","dashboard_general.html"],
       "matches":   ["<all_urls>"]
     }
   ],

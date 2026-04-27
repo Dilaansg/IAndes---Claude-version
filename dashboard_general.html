@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Ambiental</title>
+    <link rel="stylesheet" href="assets/css/dashboard_general.css">
+</head>
+<body>
+
+    <div class="dashboard">
+        <header class="dashboard-header">
+            <h1>Resumen Semanal</h1>
+            <p>Tu impacto ambiental de los últimos 7 días</p>
+        </header>
+
+        <section class="metrics-grid">
+            <div class="card metric-card">
+                <img src="assets/images/water.png" alt="Agua">
+                <div class="metric-info">
+                    <h3>Gasto de Agua</h3>
+                    <p class="value" id="metric-water"><span class="metric-value">–</span> <span class="metric-unit">L</span></p>
+                </div>
+            </div>
+
+            <div class="card metric-card">
+                <img src="assets/images/co2.png" alt="Huella de Carbono">
+                <div class="metric-info">
+                    <h3>Huella de Carbono</h3>
+                    <p class="value" id="metric-co2"><span class="metric-value">–</span> <span class="metric-unit">kg</span></p>
+                </div>
+            </div>
+
+            <div class="card metric-card">
+                <img src="assets/images/token.png" alt="Tokens">
+                <div class="metric-info">
+                    <h3>Tokens Consumidos</h3>
+                    <p class="value" id="metric-tokens"><span class="metric-value">–</span> <span class="metric-unit">tokens</span></p>
+                </div>
+            </div>
+        </section>
+
+        <section class="content-grid">
+            <div class="card chart-card">
+                <h2>Comportamiento Semanal</h2>
+                <div class="css-bar-chart">
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 60%;"></div>
+                        <div class="bar carbon" style="height: 40%;"></div>
+                        <span class="dow">Lun</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 80%;"></div>
+                        <div class="bar carbon" style="height: 50%;"></div>
+                        <span class="dow">Mar</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 50%;"></div>
+                        <div class="bar carbon" style="height: 30%;"></div>
+                        <span class="dow">Mié</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 90%;"></div>
+                        <div class="bar carbon" style="height: 70%;"></div>
+                        <span class="dow">Jue</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 40%;"></div>
+                        <div class="bar carbon" style="height: 20%;"></div>
+                        <span class="dow">Vie</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 30%;"></div>
+                        <div class="bar carbon" style="height: 10%;"></div>
+                        <span class="dow">Sáb</span>
+                    </div>
+                    <div class="bar-group">
+                        <div class="bar water" style="height: 20%;"></div>
+                        <div class="bar carbon" style="height: 15%;"></div>
+                        <span class="dow">Dom</span>
+                    </div>
+                </div>
+                <div class="chart-legend">
+                    <span class="legend-item"><span class="dot water-dot"></span> Agua</span>
+                    <span class="legend-item"><span class="dot carbon-dot"></span> Carbono</span>
+                </div>
+            </div>
+
+            <div class="card fun-fact-card">
+                <div class="fact-icon">💡</div>
+                <h2>Dato Curioso</h2>
+                <p id="fun-fact">Calculando…</p>
+                <div class="fact-decoration"></div>
+            </div>
+        </section>
+    </div>
+
+    <script src="dashboard_general.js"></script>
+</body>
+</html>
