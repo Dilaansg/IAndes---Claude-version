@@ -14,6 +14,42 @@ const improveCard = document.getElementById("improve-card");
 let recommendedOllamaModel = "qwen3.5:2b";
 
 // ---------------------------------------------------------------------------
+// Soporte para panel flotante (iframe embebido en el sitio)
+// ---------------------------------------------------------------------------
+
+const IS_EMBEDDED_PANEL = (() => {
+    try { return window.top !== window; } catch { return true; }
+})();
+
+let lastPanelContext = null;
+
+function providerIdToBadge(providerId) {
+    if (providerId === "chatgpt") return { name: "ChatGPT", color: "#10a37f" };
+    if (providerId === "claude") return { name: "Claude", color: "#d97706" };
+    if (providerId === "gemini") return { name: "Gemini", color: "#4285f4" };
+    if (providerId === "copilot") return { name: "Copilot", color: "#3b82f6" };
+    return { name: "Chat desconocido", color: "var(--muted)" };
+}
+
+function requestPanelContext() {
+    if (!IS_EMBEDDED_PANEL) return;
+    try {
+        window.parent.postMessage({ type: "IANDES_PANEL_REQUEST" }, "*");
+    } catch {
+        // ignore
+    }
+}
+
+if (IS_EMBEDDED_PANEL) {
+    window.addEventListener("message", (event) => {
+        const data = event?.data;
+        if (!data || typeof data !== "object") return;
+        if (data.type !== "IANDES_PANEL_CONTEXT") return;
+        lastPanelContext = data;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Selector de modo
 // ---------------------------------------------------------------------------
 
@@ -70,19 +106,27 @@ document.getElementById("copy-cmd")?.addEventListener("click", async () => {
 // ---------------------------------------------------------------------------
 
 async function updateProviderBadge() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.url) return;
-
-    const url = tab.url;
-    let name  = "Chat desconocido";
+    let name = "Detectando…";
     let color = "var(--muted)";
 
-    if (url.includes("chat.openai.com") || url.includes("chatgpt.com")) {
-        name = "ChatGPT"; color = "#10a37f";
-    } else if (url.includes("claude.ai")) {
-        name = "Claude";  color = "#d97706";
-    } else if (url.includes("gemini.google.com")) {
-        name = "Gemini";  color = "#4285f4";
+    if (IS_EMBEDDED_PANEL) {
+        const providerId = lastPanelContext?.provider;
+        const info = providerIdToBadge(providerId);
+        name = info.name;
+        color = info.color;
+    } else {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.url) return;
+
+        const url = tab.url;
+        name = "Chat desconocido";
+        if (url.includes("chat.openai.com") || url.includes("chatgpt.com")) {
+            name = "ChatGPT"; color = "#10a37f";
+        } else if (url.includes("claude.ai")) {
+            name = "Claude";  color = "#d97706";
+        } else if (url.includes("gemini.google.com")) {
+            name = "Gemini";  color = "#4285f4";
+        }
     }
 
     const badge = document.getElementById("provider-name");
@@ -101,10 +145,27 @@ async function updateProviderBadge() {
 // ---------------------------------------------------------------------------
 
 async function refreshMetrics() {
+    if (IS_EMBEDDED_PANEL) {
+        const data = lastPanelContext?.metrics;
+        if (!data) return;
+
+        const tokensEl = document.getElementById("val-tokens");
+        const waterEl = document.getElementById("val-water");
+        const co2El = document.getElementById("val-co2");
+        if (data.tokens != null && tokensEl) tokensEl.textContent = data.tokens + " tok";
+        if (data.water_ml != null && waterEl) waterEl.textContent = data.water_ml + " ml";
+        if (data.co2_g != null && co2El) co2El.textContent = data.co2_g + " g";
+
+        const sourceEl = document.getElementById("val-source");
+        const sourceText = data.source || "–";
+        const providerText = data.provider ? ` (${data.provider})` : "";
+        if (sourceEl) sourceEl.textContent = `${sourceText}${providerText}`;
+        return;
+    }
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;
 
-    // Pedir las métricas al Content Script que está corriendo en esa pestaña
     chrome.tabs.sendMessage(tab.id, { type: "GET_METRICS" }, (data) => {
         if (chrome.runtime.lastError || !data) return;
 
@@ -115,7 +176,6 @@ async function refreshMetrics() {
         if (data.water_ml != null && waterEl) waterEl.textContent = data.water_ml + " ml";
         if (data.co2_g != null && co2El) co2El.textContent = data.co2_g + " g";
 
-        // Mostrar la fuente del conteo (tiktoken, API de Anthropic, etc.)
         const sourceEl = document.getElementById("val-source");
         const sourceText = data.source || "–";
         const providerText = data.provider ? ` (${data.provider})` : "";
@@ -247,4 +307,13 @@ refreshSessionSummary();
 setInterval(refreshMetrics, 2000);
 setInterval(refreshSystemStatus, 5000);
 setInterval(refreshSessionSummary, 2000);
+
+// En modo embebido, pedir contexto al content script periódicamente.
+if (IS_EMBEDDED_PANEL) {
+    requestPanelContext();
+    setInterval(() => {
+        requestPanelContext();
+        updateProviderBadge();
+    }, 1000);
+}
 

@@ -87,6 +87,87 @@ let ignoreInputBlurUntil = 0;
 let optimizationTimeoutId = null;
 
 // ---------------------------------------------------------------------------
+// TRACKING: consumo semanal (tokens/agua/CO2) por sitios soportados
+// ---------------------------------------------------------------------------
+
+const USAGE_STORAGE_KEY = "iandesUsageDailyV1";
+let lastUsageLoggedAt = 0;
+let lastUsagePromptKey = "";
+
+function formatLocalDayKey(ts) {
+    const d = new Date(ts);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}
+
+function clampToFiniteNumber(value, fallback = 0) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+}
+
+function persistUsageSample({ promptKey, tokens, water_ml, co2_g, provider, host }) {
+    const now = Date.now();
+    if (!promptKey) return;
+
+    // Dedupe básico para no sumar cada pausa de edición.
+    if (promptKey === lastUsagePromptKey) return;
+    if (now - lastUsageLoggedAt < 10_000) return;
+
+    lastUsagePromptKey = promptKey;
+    lastUsageLoggedAt = now;
+
+    const dayKey = formatLocalDayKey(now);
+    const tokensN = Math.max(0, Math.round(clampToFiniteNumber(tokens, 0)));
+    const waterN = Math.max(0, clampToFiniteNumber(water_ml, 0));
+    const co2N = Math.max(0, clampToFiniteNumber(co2_g, 0));
+
+    try {
+        chrome.storage.local.get([USAGE_STORAGE_KEY], (result) => {
+            if (chrome.runtime.lastError) return;
+
+            const current = result?.[USAGE_STORAGE_KEY];
+            const next = (current && typeof current === "object")
+                ? current
+                : { version: 1, days: {}, updatedAt: 0 };
+
+            if (!next.days || typeof next.days !== "object") next.days = {};
+
+            const day = next.days[dayKey] && typeof next.days[dayKey] === "object"
+                ? next.days[dayKey]
+                : { tokens: 0, water_ml: 0, co2_g: 0, byHost: {}, byProvider: {} };
+
+            day.tokens = clampToFiniteNumber(day.tokens, 0) + tokensN;
+            day.water_ml = clampToFiniteNumber(day.water_ml, 0) + waterN;
+            day.co2_g = clampToFiniteNumber(day.co2_g, 0) + co2N;
+
+            const safeHost = host || "unknown";
+            const safeProvider = provider || "unknown";
+
+            day.byHost = (day.byHost && typeof day.byHost === "object") ? day.byHost : {};
+            day.byProvider = (day.byProvider && typeof day.byProvider === "object") ? day.byProvider : {};
+
+            day.byHost[safeHost] = clampToFiniteNumber(day.byHost[safeHost], 0) + tokensN;
+            day.byProvider[safeProvider] = clampToFiniteNumber(day.byProvider[safeProvider], 0) + tokensN;
+
+            next.days[dayKey] = day;
+            next.updatedAt = now;
+
+            // Mantener solo ~35 días para evitar crecimiento indefinido.
+            const keepAfter = now - 35 * 24 * 60 * 60 * 1000;
+            for (const k of Object.keys(next.days)) {
+                const ts = Date.parse(`${k}T00:00:00`);
+                if (!Number.isFinite(ts)) continue;
+                if (ts < keepAfter) delete next.days[k];
+            }
+
+            chrome.storage.local.set({ [USAGE_STORAGE_KEY]: next });
+        });
+    } catch {}
+}
+
+// ---------------------------------------------------------------------------
 // WEB WORKER: conteo de tokens (tiktoken en worker o heurística)
 // ---------------------------------------------------------------------------
 // [FIX-CSP] Variables globales del worker
@@ -1084,6 +1165,18 @@ async function processPrompt(text, options = {}) {
     } catch {}
 
     // Si no estamos en modo localOnly, pedir al Worker un conteo más preciso
+    // Registrar consumo semanal (tokens/agua/CO2) observado por la extensión.
+    try {
+        persistUsageSample({
+            promptKey: normalizePromptKey(normalizedText),
+            tokens: estimatedTokens,
+            water_ml: impact.water_ml,
+            co2_g: impact.co2_g,
+            provider: PROVIDER.id,
+            host: location.hostname,
+        });
+    } catch {}
+
     if (!CONFIG.localOnlyMode) {
         try {
             countTokensWithWorker(text, PROVIDER.model).then(({ tokens: workerTokens, source }) => {
