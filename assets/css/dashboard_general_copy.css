@@ -1,0 +1,63 @@
+/* Este ID debe coincidir con el contenedor principal de tu HTML */
+#mi-extension-eco-widget {
+    position: fixed !important; /* !important asegura que gane a los estilos de Gemini */
+    top: 220px !important;
+    right: 20px !important;
+    width: 250px !important; /* Ancho fijo para que no se estire */
+    height: auto !important;
+    max-height: 30vh;
+    overflow-y: auto;
+    z-index: 2147483647 !important; /* Lo mantiene por encima de todo */
+    background-color: #ffffff; /* Color de fondo para que no sea transparente */
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    padding: 15px;
+}
+
+/* Asegúrate de que el dashboard interno no intente ocupar el 100% de la pantalla */
+#dashboard {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+/* 2. Prefijar TODAS las reglas. Nunca uses etiquetas sueltas (como h1 o p) */
+#mi-extension-eco-widget #dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 15px; /* Reducir espacios */
+}
+
+#mi-extension-eco-widget #dashboard-header h1 {
+    font-size: 18px; /* Texto más pequeño */
+    margin: 0 0 5px 0;
+}
+
+#mi-extension-eco-widget #dashboard-header p {
+    font-size: 12px;
+    margin: 0;
+}
+
+/* 3. Ajustar el Grid para el espacio pequeño */
+#mi-extension-eco-widget #metrics-grid {
+    display: flex;
+ /* Apilar tarjetas para que quepan en 320px */
+    gap: 10px;
+    justify-content: center;
+}
+
+#mi-extension-eco-widget .eco-card {
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+#mi-extension-eco-widget .eco-img {
+    width: 35px; /* Imágenes más pequeñas */
+    height: 35px;
+}
+
+/* Aplica esta lógica (prefijo + tamaño reducido) a tus gráficas y datos curiosos */
