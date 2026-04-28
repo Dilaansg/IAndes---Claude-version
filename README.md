@@ -1,74 +1,200 @@
-# IAndes
+# IAndes v5.0
 
-Extension MV3 para optimizar prompts localmente en chats de IA (ChatGPT, Claude, Gemini) y mostrar estimaciones de impacto (tokens, agua y CO2) sin enviar datos a infraestructura externa.
+> Extension de Chrome (Manifest V3) para optimizar prompts via servidor Python local y mostrar estimaciones de impacto ambiental (tokens, agua, CO₂).
 
-## Principios
+**Procesamiento server-side.** La extensión envía el prompt a un servidor Python local (FastAPI) que procesa a través de un pipeline D1-D6 (verifier, segmenter, budget, pruner, validator, rebuilder).
 
-- Todo el procesamiento es local.
-- Arquitectura por capas con degradacion elegante.
-- Modo de mejora con fallback cuando no hay Ollama.
+---
 
-## Arquitectura actual
+## Características
 
-### Modo Comprimir
+- **Pipeline D1-D6:** Verifier → Semantic Segmenter → Budget Controller → Token Pruner → Coherence Validator → Rebuilder
+- **Modo Comprimir:** Elimina cortesía, muletillas y redundancias preservando semántica
+- **Modo Mejorar:** Añade estructura (rol, contexto, restricciones)
+- **Impacto ambiental:** Estima agua y CO₂ por prompt (fórmulas Patterson/Li)
 
-1. Capa 0: clasificacion de prompt en `content.js`.
-2. Capa 1: limpieza lexico-determinista en `content.js`.
-3. Capa 2: deduplicacion semantica (ONNX + MiniLM) en `background.js`.
-4. Capa 3: reescritura generativa con Ollama en `background.js` (si disponible).
+---
 
-### Modo Mejorar
+## Instalación Rápida
 
-1. Capa 0-M: analisis de componentes presentes/faltantes en `background.js`.
-2. Capa 1-M: mejora por plantillas si no hay Ollama.
-3. Capa 2-M: mejora generativa con Ollama si hay modelo valido.
-4. Reemplazo controlado desde `content.js` con revision previa (aceptar/descartar).
+1. Clonar o descargar el proyecto
+2. Abrir `chrome://extensions`
+3. Activar **Modo desarrollador**
+4. Clic en **"Cargar extensión sin empaquetar"**
+5. Seleccionar la carpeta `IAndes`
 
-## Estructura principal
+La extensión envía el prompt al servidor local para optimización.
 
-- `manifest.json`: configuracion MV3, permisos, content scripts y service worker.
-- `content.js`: deteccion de proveedor, overlay de metricas, capas locales, UX de revision e inyeccion.
-- `background.js`: pipeline pesado (ONNX, scoring de Ollama, mejora/compresion).
-- `popup.html` + `popup.js`: estado del sistema, modo activo, banner de Ollama, resumen de sesion.
-- `token_worker.js`: conteo de tokens en worker con fallback heuristico.
-- `REGLAS_CAPA1.md`: catalogo explicito de reglas de limpieza lexico-determinista.
+---
 
-## Requisitos
+## Instalación del Servidor (Obligatorio)
 
-### Obligatorio para Capa 2
+Para funcionar, IAndes requiere el servidor Python local:
 
-El archivo `lib/ort.min.js` debe existir para habilitar ONNX Runtime Web.
+```bash
+# 1. Instalar dependencias del servidor
+cd iandes-server
+pip install -r requirements.txt
 
-Ejemplo rapido (PowerShell):
-
-```powershell
-New-Item -ItemType Directory -Force lib | Out-Null
-Invoke-WebRequest -Uri "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js" -OutFile "lib/ort.min.js"
+# 2. Iniciar el servidor
+python run.py
+# o
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### Opcional para Capa 3 / Capa 2-M
+El servidor debe estar corriendo en `http://localhost:8000` antes de usar la extensión.
 
-- Ollama instalado y corriendo en `http://localhost:11434`.
-- Modelo recomendado: `qwen3.5:2b`.
-
-```powershell
-ollama pull qwen3.5:2b
-```
+---
 
 ## Uso
 
-1. Cargar la extension en modo desarrollador (`chrome://extensions` -> Load unpacked).
-2. Abrir ChatGPT, Claude o Gemini.
-3. Escribir un prompt y dejar de tipear.
-4. IAndes mostrara una alerta minima no invasiva cuando detecte oportunidad de optimizacion.
-5. Presionar `Optimizar` o `Mejorar` para ejecutar el pipeline manualmente.
-6. En modo mejorar, revisar cambios y elegir:
-   - Aceptar y reemplazar
-   - Descartar
+1. Asegurarse que el servidor está corriendo (`python run.py` en `iandes-server/`)
+2. Abrir ChatGPT, Claude o Gemini
+3. Escribir un prompt
+4. IAndes muestra overlay con métricas locales (tokens, 💧 gotas, 🌍 CO₂)
+5. Automáticamente envía al servidor para optimización
+6. Panel Before/After muestra el resultado con segmentos anotados
+7. Aceptar, editar o descartar
 
-## Estado de implementacion
+### Botones de Modo
 
-- Sin servidor local Python.
-- Metricas ambientales por estimacion local.
-- Resumen de sesion en popup conectado a estadisticas persistidas.
-- Brechas y roadmap en `BRECHAS_ARQUITECTURA.md`.
+Los botones **[⬇ Comprimir]** **[✦ Mejorar]** están en el overlay, sin necesidad de abrir el popup.
+
+---
+
+## Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  EXTENSIÓN CHROME                                                │
+│                                                                  │
+│  Content Scripts ─────────────────────────────────────────────► │
+│  (content.js)     │ Texto → Métricas locales → SW               │
+│                                                                  │
+│  Service Worker ──────────────────────────────────────────────► │
+│  (background.js)  │ Pre-flight classification → Servidor        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  SERVIDOR LOCAL (localhost:8000)                                 │
+│                                                                  │
+│  D1: Intent Verifier     — Verifica/clasifica intent             │
+│  D2: Semantic Segmenter  — Divide en segmentos semánticos       │
+│  D3: Budget Controller   — Asigna presupuesto de compresión     │
+│  D4: Token Pruner        — poda TF-IDF (aquí lived las regex)   │
+│  D5: Coherence Validator — Verifica similitud, rollback si baja  │
+│  D6: Rebuilder           — Reconstruye prompt optimizado         │
+└─────────────────────────────────────────────────────────────────┘
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Capa 0: Clasificación (classifyPrompt)                     │
+│  - Detecta perfil: short_direct, long_padded, etc.         │
+│  - Determina qué capas activar                              │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Capa 1: Filtro Léxico (applyLayer1Detailed)                │
+│  - Regex: saludos, cortesía, muletillas                     │
+│  - SIEMPRE se aplica (baseline)                             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Capa 2: Deduplicación Semántica                            │
+│  - Transformers.js (preciso, ~22MB)                         │
+│  - Jaccard fallback (heurística, siempre disponible)        │
+│  - Elimina frases redundantes                               │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Capa 3: Reescritura Generativa (Ollama)                    │
+│  - Requiere Ollama instalado                                │
+│  - Modelo: qwen3.5:2b recomendado                           │
+│  - Comprime sin perder significado                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Estructura del Proyecto
+
+```
+IAndes/
+├── iandes-server/         # Servidor Python (FastAPI)
+│   ├── main.py            # Entry point
+│   ├── run.py             # Launcher
+│   ├── pipeline/          # D1-D6 modules
+│   │   ├── verifier.py    # D1: Intent verification
+│   │   ├── segmenter.py  # D2: Semantic segmentation
+│   │   ├── budget.py     # D3: Compression budget
+│   │   ├── pruner.py     # D4: Token pruning
+│   │   ├── validator.py  # D5: Coherence validation
+│   │   └── rebuilder.py  # D6: Prompt rebuild
+│   ├── models/           # ML models (spaCy, MiniLM)
+│   ├── impact/           # Environmental formulas
+│   ├── schemas/          # Pydantic schemas
+│   └── ui/               # Server UI
+├── preflight/             # Service Worker pre-flight modules
+│   ├── classifier.js     # Intent classifier
+│   ├── lang-detector.js  # Language detection
+│   ├── signal-extractor.js
+│   └── payload-builder.js # PromptAnalysis v2.0
+├── tests/
+│   └── sandbox/          # Test environment
+├── content-*.js          # Content script modules
+├── background.js         # Service Worker (v5: HTTP router)
+├── bg-server-client.js    # HTTP client to server
+├── config.js             # Configuration
+├── token_utils.js        # Token estimation
+├── error_utils.js        # Error contract
+├── types.js              # JSDoc types
+├── content.js            # Main content script
+├── content-pipeline.js   # v5: Send to SW, no local processing
+├── content-overlay.js    # Overlay UI
+├── content-panels.js     # Before/After panels
+├── manifest.json         # Manifest V3
+├── popup.html/js         # Extension popup
+└── README.md             # This file
+```
+
+---
+
+## Tests
+
+```bash
+# Sandbox de pruebas (requiere servidor corriendo)
+cd tests/sandbox
+pip install fastapi uvicorn
+python test-server.py
+# Abrir test-page.html en Chrome
+
+# Server tests
+cd iandes-server
+pytest tests/
+```
+
+---
+
+## Requisitos
+
+- **Servidor:** Python 3.10+, FastAPI, uvicorn, spaCy, sentence-transformers
+- **Extensión:** Chrome 88+ (Manifest V3)
+
+---
+
+## Changelog
+
+Ver [CHANGELOG.md](CHANGELOG.md) para historial completo de cambios.
+
+---
+
+## Licencia
+
+MIT
+
+---
+
+*IAndes v4.0 — 26 de Abril 2026*

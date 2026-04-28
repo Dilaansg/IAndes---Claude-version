@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IAndes v5 — Sandbox Test Environment</title>
+    <style>
+        :root {
+            --bg-primary: #0a0c14;
+            --bg-secondary: #1a1a2e;
+            --bg-tertiary: #12141f;
+            --accent: #00e696;
+            --accent-dim: rgba(0, 230, 150, 0.15);
+            --text-primary: #d8e8df;
+            --text-secondary: #9d9d9d;
+            --text-muted: #6b8a78;
+            --border: rgba(255, 255, 255, 0.1);
+            --error: #ff4d6d;
+            --warning: #ffc107;
+            --info: #4285f4;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+        .header-title span {
+            color: var(--text-muted);
+            font-weight: 400;
+            font-size: 12px;
+            margin-left: 8px;
+        }
+        .server-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .server-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .server-dot.available {
+            background: var(--accent);
+            box-shadow: 0 0 6px var(--accent);
+        }
+        .server-dot.unavailable {
+            background: var(--error);
+            box-shadow: 0 0 6px var(--error);
+        }
+
+        /* Main layout */
+        .main {
+            flex: 1;
+            display: flex;
+            gap: 0;
+            overflow: hidden;
+        }
+
+        /* Left panel — Chat simulation */
+        .chat-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border);
+        }
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .chat-bubble {
+            max-width: 80%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+        .chat-bubble.user {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            align-self: flex-end;
+        }
+        .chat-bubble.assistant {
+            background: var(--accent-dim);
+            border: 1px solid rgba(0, 230, 150, 0.2);
+            align-self: flex-start;
+        }
+        .chat-bubble.system {
+            background: rgba(66, 133, 244, 0.1);
+            border: 1px solid rgba(66, 133, 244, 0.2);
+            align-self: center;
+            font-size: 11px;
+            color: var(--info);
+        }
+        .chat-bubble.error {
+            background: rgba(255, 77, 109, 0.1);
+            border: 1px solid rgba(255, 77, 109, 0.2);
+            align-self: center;
+            font-size: 11px;
+            color: var(--error);
+        }
+
+        /* Input area */
+        .chat-input-area {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .input-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
+        }
+        #prompt-textarea {
+            flex: 1;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 13px;
+            resize: none;
+            min-height: 44px;
+            max-height: 120px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        #prompt-textarea:focus {
+            border-color: var(--accent);
+        }
+        #prompt-textarea::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            font-family: inherit;
+            white-space: nowrap;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+        }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid #333;
+        }
+        .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+        .btn-compress {
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 1px solid rgba(0, 230, 150, 0.3);
+        }
+        .btn-compress.active {
+            background: var(--accent);
+            color: #000;
+        }
+        .btn-enhance {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid #333;
+        }
+        .btn-enhance.active {
+            background: var(--accent);
+            color: #000;
+        }
+
+        /* Mode selector */
+        .mode-row {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .mode-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-right: 4px;
+        }
+
+        /* Right panel — Results */
+        .results-panel {
+            width: 420px;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-tertiary);
+        }
+        .results-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .results-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        /* Before/After panels */
+        .comparison-section {
+            margin-bottom: 16px;
+        }
+        .comparison-label {
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        .comparison-label.before { color: var(--text-muted); }
+        .comparison-label.after { color: var(--accent); }
+        .comparison-box {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            word-break: break-word;
+            border: 1px solid var(--border);
+        }
+        .comparison-box.after {
+            background: var(--accent-dim);
+            border-color: rgba(0, 230, 150, 0.2);
+        }
+
+        /* Stats */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .stat-card {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 16px;
+            font-weight: 700;
+        }
+        .stat-value.green { color: var(--accent); }
+        .stat-value.blue { color: var(--info); }
+        .stat-value.yellow { color: var(--warning); }
+        .stat-label {
+            font-size: 9px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* Segments */
+        .segment {
+            border-radius: 4px;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            font-size: 10px;
+            line-height: 1.4;
+            word-break: break-word;
+            border-left: 3px solid;
+        }
+        .segment.intent { background: rgba(0,230,150,0.15); border-color: #00e696; }
+        .segment.constraint { background: rgba(66,133,244,0.15); border-color: #4285f4; }
+        .segment.context_high { background: rgba(255,193,7,0.15); border-color: #ffc107; }
+        .segment.context_low { background: rgba(255,152,0,0.15); border-color: #ff9800; }
+        .segment.filler { background: rgba(244,67,54,0.15); border-color: #f44336; }
+        .segment-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 2px;
+        }
+        .segment-type { font-weight: 600; font-size: 9px; }
+        .segment-ratio { color: var(--text-muted); font-size: 8px; }
+        .segment-text { color: var(--text-secondary); font-size: 9px; }
+        .segment-text.strikethrough { text-decoration: line-through; opacity: 0.5; }
+
+        /* Quality warning */
+        .quality-warning {
+            background: rgba(255, 193, 7, 0.1);
+            border: 1px solid var(--warning);
+            border-radius: 8px;
+            padding: 8px 10px;
+            margin-bottom: 12px;
+        }
+        .quality-warning-title {
+            color: var(--warning);
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .quality-warning-text {
+            color: var(--text-secondary);
+            font-size: 9px;
+            line-height: 1.4;
+        }
+
+        /* Pipeline timing */
+        .pipeline-timing {
+            margin-top: 12px;
+        }
+        .pipeline-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            color: var(--text-muted);
+            padding: 2px 0;
+        }
+        .pipeline-row .time { color: var(--text-secondary); }
+
+        /* Empty state */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            font-size: 12px;
+            text-align: center;
+            padding: 40px;
+        }
+        .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.5; }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--text-muted);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Test case buttons */
+        .test-cases-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 4px;
+        }
+        .test-case-btn {
+            padding: 3px 8px;
+            font-size: 9px;
+            border-radius: 4px;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+        .test-case-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+    <div class="header-title">
+        ▸ IAndes Sandbox <span>v5.0 — Test Environment</span>
+    </div>
+    <div class="server-status">
+        <div class="server-dot" id="server-dot"></div>
+        <span id="server-label">Verificando servidor…</span>
+    </div>
+</div>
+
+<!-- Main layout -->
+<div class="main">
+
+    <!-- Left: Chat simulation -->
+    <div class="chat-panel">
+        <div class="chat-messages" id="chat-messages">
+            <div class="chat-bubble system">Sandbox listo. Escribe un prompt y haz clic en Optimizar.</div>
+        </div>
+        <div class="chat-input-area">
+            <div class="mode-row">
+                <span class="mode-label">Modo:</span>
+                <button class="btn btn-compress active" id="btn-compress" onclick="setMode('compress')">⬇ Comprimir</button>
+                <button class="btn btn-enhance" id="btn-enhance" onclick="setMode('enhance')">✦ Mejorar</button>
+            </div>
+            <div class="input-row">
+                <textarea id="prompt-textarea" rows="2" placeholder="Escribe un prompt para optimizar…"></textarea>
+                <button class="btn btn-primary" id="btn-optimize" onclick="handleOptimize()">Optimizar</button>
+            </div>
+            <div class="test-cases-row" id="test-cases-row">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Right: Results -->
+    <div class="results-panel">
+        <div class="results-header">
+            <span>Resultado</span>
+            <span id="result-mode" style="font-weight:400;color:var(--text-muted);font-size:10px;">—</span>
+        </div>
+        <div class="results-content" id="results-content">
+            <div class="empty-state">
+                <div class="icon">⬇</div>
+                <div>Los resultados de la optimización aparecerán aquí.</div>
+                <div style="margin-top:8px;font-size:10px;">Escribe un prompt y haz clic en Optimizar.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- MOCK CHROME EXTENSION APIs                                   -->
+<!-- ============================================================ -->
+<script>
+/**
+ * Mock chrome.storage.local — backed by localStorage for persistence
+ */
+if (typeof chrome === 'undefined') {
+    window.chrome = {};
+}
+
+chrome.storage = chrome.storage || {};
+chrome.storage.local = {
+    _data: {},
+    get(keys, callback) {
+        try {
+            const stored = localStorage.getItem('iandes_sandbox_storage');
+            if (stored) this._data = JSON.parse(stored);
+        } catch (e) {}
+        const result = {};
+        if (typeof keys === 'string') {
+            result[keys] = this._data[keys];
+        } else if (Array.isArray(keys)) {
+            keys.forEach(k => { result[k] = this._data[k]; });
+        } else if (typeof keys === 'object' && keys !== null) {
+            Object.keys(keys).forEach(k => { result[k] = this._data[k] !== undefined ? this._data[k] : keys[k]; });
+        }
+        if (callback) callback(result);
+    },
+    set(items, callback) {
+        Object.assign(this._data, items);
+        try {
+            localStorage.setItem('iandes_sandbox_storage', JSON.stringify(this._data));
+        } catch (e) {}
+        if (callback) callback();
+    },
+    remove(keys, callback) {
+        if (typeof keys === 'string') keys = [keys];
+        keys.forEach(k => delete this._data[k]);
+        try {
+            localStorage.setItem('iandes_sandbox_storage', JSON.stringify(this._data));
+        } catch (e) {}
+        if (callback) callback();
+    }
+};
+
+/**
+ * Mock chrome.runtime — simulates the message passing between content script and background
+ */
+chrome.runtime = chrome.runtime || {};
+chrome.runtime.id = 'iandes-sandbox-mock';
+chrome.runtime.lastError = null;
+
+// Message listeners (simulating chrome.runtime.onMessage)
+const _messageListeners = [];
+chrome.runtime.onMessage = {
+    addListener(fn) { _messageListeners.push(fn); },
+    removeListener(fn) {
+        const idx = _messageListeners.indexOf(fn);
+        if (idx >= 0) _messageListeners.splice(idx, 1);
+    }
+};
+
+/**
+ * Mock chrome.runtime.sendMessage — routes to the sandbox handler
+ */
+chrome.runtime.sendMessage = function(message, callback) {
+    console.log('[Sandbox] chrome.runtime.sendMessage:', message.type, message);
+
+    // Simulate the background script behavior
+    handleBackgroundMessage(message, callback);
+};
+
+/**
+ * Simulates the background script processing
+ */
+async function handleBackgroundMessage(message, callback) {
+    if (message.type === 'GET_STATUS') {
+        const status = await checkServerHealth();
+        if (callback) callback({
+            ok: true,
+            serverAvailable: status.available,
+            serverVersion: status.version || 'unknown',
+            modelsLoaded: status.modelsLoaded || false
+        });
+        return;
+    }
+
+    if (message.type === 'SET_MODE') {
+        chrome.storage.local.set({ mode: message.mode });
+        if (callback) callback({ ok: true });
+        return;
+    }
+
+    if (message.type === 'OPTIMIZE_PROMPT') {
+        if (callback) callback({ ok: true });
+
+        try {
+            const result = await sendToServer({
+                version: '2.0',
+                request_id: message.requestId || crypto.randomUUID(),
+                raw_prompt: message.text || message.originalText || '',
+                mode: message.mode || 'compress',
+                preflight: {
+                    intent: message.classification?.profile || 'general',
+                    confidence: 0.7,
+                    estimated_tokens: estimateTokensLocal(message.text || message.originalText || ''),
+                    language: 'es',
+                    has_code_blocks: message.classification?.signals?.hasCode || false,
+                    paragraph_count: 1,
+                },
+                constraints: {
+                    max_output_tokens: null,
+                    preserve_entities: true,
+                    quality_floor: 0.85,
+                },
+                metadata: {
+                    source: message.provider || 'sandbox',
+                    timestamp: Date.now(),
+                },
+            });
+
+            if (result.ok) {
+                const optimizationResult = result.data;
+                const tokensSaved = optimizationResult.savings?.tokens_saved || 0;
+
+                // Dispatch OPTIMIZED_PROMPT to content script listeners
+                const optimizedMsg = {
+                    type: 'OPTIMIZED_PROMPT',
+                    text: optimizationResult.optimized_prompt,
+                    originalText: message.originalText || message.text,
+                    mode: message.mode || 'compress',
+                    requestId: message.requestId,
+                    stats: {
+                        originalTokens: optimizationResult.original_tokens,
+                        optimizedTokens: optimizationResult.optimized_tokens,
+                        savedTokens: tokensSaved,
+                        savedPct: optimizationResult.original_tokens > 0
+                            ? Math.round((tokensSaved / optimizationResult.original_tokens) * 100)
+                            : 0,
+                        layers: ['server'],
+                        similarityScore: optimizationResult.similarity_score,
+                        qualityWarning: optimizationResult.quality_warning || false,
+                        pipelineMs: optimizationResult.pipeline_ms,
+                    },
+                    segments: optimizationResult.segments || [],
+                    savings: optimizationResult.savings,
+                    serverVersion: optimizationResult.server_version,
+                };
+
+                // Deliver to content script listeners
+                _messageListeners.forEach(fn => {
+                    try { fn(optimizedMsg, { tab: { id: 'sandbox' } }, () => {}); } catch (e) {}
+                });
+
+                // Also render in sandbox UI
+                renderOptimizationResult(optimizedMsg);
+
+            } else {
+                const errorMsg = {
+                    type: 'OPTIMIZATION_ERROR',
+                    mode: message.mode || 'compress',
+                    message: result.error || 'Error al comunicarse con el servidor.',
+                    requestId: message.requestId,
+                };
+                _messageListeners.forEach(fn => {
+                    try { fn(errorMsg, { tab: { id: 'sandbox' } }, () => {}); } catch (e) {}
+                });
+                renderError(result.error || 'Error al comunicarse con el servidor.');
+            }
+        } catch (err) {
+            const errorMsg = {
+                type: 'OPTIMIZATION_ERROR',
+                mode: message.mode || 'compress',
+                message: err.message || 'Error inesperado.',
+                requestId: message.requestId,
+            };
+            _messageListeners.forEach(fn => {
+                try { fn(errorMsg, { tab: { id: 'sandbox' } }, () => {}); } catch (e) {}
+            });
+            renderError(err.message || 'Error inesperado.');
+        }
+        return;
+    }
+
+    if (callback) callback({ ok: true });
+}
+
+// Mock chrome.tabs (not needed in sandbox but prevents errors)
+chrome.tabs = {
+    sendMessage(tabId, message) {
+        _messageListeners.forEach(fn => {
+            try { fn(message, { tab: { id: tabId } }, () => {}); } catch (e) {}
+        });
+    }
+};
+</script>
+
+<!-- ============================================================ -->
+<!-- SANDBOX LOGIC                                                -->
+<!-- ============================================================ -->
+<script>
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+const SERVER_BASE = 'http://localhost:8000';
+const SERVER_TIMEOUT_MS = 5000;
+
+let currentMode = 'compress';
+let serverAvailable = false;
+let serverVersion = '';
+let isOptimizing = false;
+
+// ---------------------------------------------------------------------------
+// Token estimation (heuristic — mirrors token_utils.js)
+// ---------------------------------------------------------------------------
+function estimateTokensLocal(text) {
+    if (!text) return 0;
+    // Rough heuristic: ~4 chars per token for English, ~3.5 for Spanish
+    return Math.ceil(text.length / 3.8);
+}
+
+// ---------------------------------------------------------------------------
+// Server communication (mirrors bg-server-client.js)
+// ---------------------------------------------------------------------------
+async function checkServerHealth() {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        const resp = await fetch(`${SERVER_BASE}/health`, {
+            method: 'GET',
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (!resp.ok) {
+            serverAvailable = false;
+            return { available: false, version: '', modelsLoaded: false };
+        }
+        const data = await resp.json();
+        serverAvailable = true;
+        serverVersion = data.version || 'unknown';
+        return {
+            available: true,
+            version: serverVersion,
+            modelsLoaded: data.models_loaded || false,
+            spacyReady: data.spacy_ready || false,
+            sentenceModelReady: data.sentence_model_ready || false,
+        };
+    } catch (e) {
+        serverAvailable = false;
+        return { available: false, version: '', modelsLoaded: false };
+    }
+}
+
+async function sendToServer(payload) {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), SERVER_TIMEOUT_MS);
+        const resp = await fetch(`${SERVER_BASE}/optimize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (resp.status === 413) {
+            return { ok: false, error: 'Prompt demasiado largo (máximo 8000 caracteres)', errorCode: 'PAYLOAD_TOO_LARGE' };
+        }
+        if (resp.status === 500) {
+            let errorDetail = 'Error interno del servidor';
+            try { const ed = await resp.json(); errorDetail = ed.detail || errorDetail; } catch (e) {}
+            return { ok: false, error: errorDetail, errorCode: 'SERVER_ERROR' };
+        }
+        if (!resp.ok) {
+            return { ok: false, error: `Error HTTP ${resp.status}`, errorCode: 'SERVER_ERROR' };
+        }
+        const data = await resp.json();
+        serverAvailable = true;
+        return { ok: true, data };
+    } catch (e) {
+        serverAvailable = false;
+        if (e.name === 'AbortError') {
+            return { ok: false, error: 'El servidor tardó demasiado', errorCode: 'TIMEOUT' };
+        }
+        return { ok: false, error: `Error de conexión: ${e.message}`, errorCode: 'SERVER_UNAVAILABLE' };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UI Functions
+// ---------------------------------------------------------------------------
+function setMode(mode) {
+    currentMode = mode;
+    document.getElementById('btn-compress').classList.toggle('active', mode === 'compress');
+    document.getElementById('btn-enhance').classList.toggle('active', mode === 'enhance');
+    chrome.storage.local.set({ mode });
+}
+
+function addChatBubble(text, type = 'user') {
+    const container = document.getElementById('chat-messages');
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${type}`;
+    bubble.textContent = text;
+    container.appendChild(bubble);
+    container.scrollTop = container.scrollHeight;
+}
+
+function renderError(message) {
+    const container = document.getElementById('results-content');
+    container.innerHTML = `
+        <div class="empty-state">
+            <div class="icon" style="color:var(--error);">✕</div>
+            <div style="color:var(--error);font-size:12px;">${escapeHtml(message)}</div>
+            <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">Verifica que el servidor IAndes esté corriendo en localhost:8000</div>
+        </div>
+    `;
+    addChatBubble(`Error: ${message}`, 'error');
+    isOptimizing = false;
+    document.getElementById('btn-optimize').disabled = false;
+}
+
+function renderOptimizationResult(msg) {
+    const container = document.getElementById('results-content');
+    const stats = msg.stats || {};
+    const segments = msg.segments || [];
+    const savings = msg.savings || {};
+    const isImprove = msg.mode === 'improve' || (msg.stats && msg.stats.improveMode);
+
+    document.getElementById('result-mode').textContent = isImprove ? '✦ Mejorar' : '⬇ Comprimir';
+
+    // Quality warning
+    let warningHtml = '';
+    if (stats.qualityWarning) {
+        warningHtml = `
+            <div class="quality-warning">
+                <div class="quality-warning-title">⚠ Advertencia de calidad</div>
+                <div class="quality-warning-text">La similitud semántica está por debajo del umbral. El prompt optimizado puede haber perdido información importante.</div>
+            </div>
+        `;
+    }
+
+    // Segments
+    let segmentsHtml = '';
+    if (segments.length > 0) {
+        const LABEL_NAMES = {
+            intent: 'Intención',
+            constraint: 'Restricción',
+            context_high: 'Contexto relevante',
+            context_low: 'Contexto accesorio',
+            filler: 'Relleno',
+        };
+        segmentsHtml = `
+            <div style="margin-bottom:12px;">
+                <div style="color:var(--text-muted);font-size:9px;font-weight:600;margin-bottom:6px;">SEGMENTOS</div>
+                ${segments.map(seg => {
+                    const isKept = seg.kept !== false;
+                    const ratio = seg.compression_ratio != null ? Math.round(seg.compression_ratio * 100) : (isKept ? 100 : 0);
+                    return `
+                        <div class="segment ${seg.label}">
+                            <div class="segment-header">
+                                <span class="segment-type" style="color:var(--${seg.label === 'intent' ? 'accent' : seg.label === 'constraint' ? 'info' : seg.label === 'context_high' ? 'warning' : seg.label === 'filler' ? 'error' : 'text-secondary'})">${LABEL_NAMES[seg.label] || seg.label}</span>
+                                <span class="segment-ratio">${isKept ? ratio + '%' : 'eliminado'}</span>
+                            </div>
+                            <div class="segment-text ${!isKept ? 'strikethrough' : ''}">${escapeHtml(seg.text)}</div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    // Savings
+    let savingsHtml = '';
+    if (savings.tokens_saved > 0 || stats.savedTokens > 0) {
+        const co2 = savings.co2_grams_saved || (stats.savedTokens * 0.0023);
+        const water = savings.water_ml_saved || (stats.savedTokens * 0.50);
+        savingsHtml = `
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value green">${stats.savedTokens}</div>
+                    <div class="stat-label">tokens ahorrados</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value blue">${co2 < 1 ? (co2 * 1000).toFixed(0) + 'mg' : co2.toFixed(2) + 'g'}</div>
+                    <div class="stat-label">CO₂ ahorrado</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value yellow">${water < 1 ? (water * 1000).toFixed(0) + 'μl' : water.toFixed(1) + 'ml'}</div>
+                    <div class="stat-label">agua ahorrada</div>
+                </div>
+            </div>
+        `;
+        if (savings.methodology_ref) {
+            savingsHtml += `<div style="color:var(--text-muted);font-size:7px;text-align:center;font-style:italic;margin-bottom:12px;">${escapeHtml(savings.methodology_ref)}</div>`;
+        }
+    }
+
+    // Similarity score
+    let similarityHtml = '';
+    if (stats.similarityScore != null) {
+        const simPct = Math.round(stats.similarityScore * 100);
+        const simColor = simPct >= 85 ? 'var(--accent)' : simPct >= 70 ? 'var(--warning)' : 'var(--error)';
+        similarityHtml = `<span style="font-size:9px;color:${simColor};margin-left:6px;">sim: ${simPct}%</span>`;
+    }
+
+    // Pipeline timing
+    let pipelineHtml = '';
+    if (stats.pipelineMs) {
+        const pm = stats.pipelineMs;
+        pipelineHtml = `
+            <div class="pipeline-timing">
+                <div style="color:var(--text-muted);font-size:9px;font-weight:600;margin-bottom:4px;">PIPELINE</div>
+                <div class="pipeline-row"><span>D1 Intent Verifier</span><span class="time">${pm.d1_verifier || 0}ms</span></div>
+                <div class="pipeline-row"><span>D2 Semantic Segmenter</span><span class="time">${pm.d2_segmenter || 0}ms</span></div>
+                <div class="pipeline-row"><span>D3 Budget Controller</span><span class="time">${pm.d3_budget || 0}ms</span></div>
+                <div class="pipeline-row"><span>D4 Token Pruner</span><span class="time">${pm.d4_pruner || 0}ms</span></div>
+                <div class="pipeline-row"><span>D5 Coherence Validator</span><span class="time">${pm.d5_validator || 0}ms</span></div>
+                <div class="pipeline-row"><span>D6 Rebuilder</span><span class="time">${pm.d6_rebuilder || 0}ms</span></div>
+                <div class="pipeline-row" style="border-top:1px solid var(--border);padding-top:4px;margin-top:4px;"><span style="font-weight:600;">Total</span><span class="time" style="font-weight:600;">${pm.total || 0}ms</span></div>
+            </div>
+        `;
+    }
+
+    // Title
+    const savedPct = stats.savedPct || (stats.savedTokens && stats.originalTokens ? Math.round((stats.savedTokens / stats.originalTokens) * 100) : 0);
+    const titleText = isImprove
+        ? '✓ Prompt mejorado'
+        : `✓ −${stats.savedTokens || 0} tokens (${savedPct}%)`;
+
+    container.innerHTML = `
+        ${warningHtml}
+        ${segmentsHtml}
+        <div style="display:flex;align-items:center;margin-bottom:8px;">
+            <div style="color:var(--accent);font-weight:600;font-size:11px;">${titleText}</div>
+            ${similarityHtml}
+        </div>
+        <div class="comparison-section">
+            <div class="comparison-label before">ANTES</div>
+            <div class="comparison-box">${escapeHtml(msg.originalText || '')}</div>
+        </div>
+        <div class="comparison-section">
+            <div class="comparison-label after">DESPUÉS</div>
+            <div class="comparison-box after">${escapeHtml(msg.text || '')}</div>
+        </div>
+        ${savingsHtml}
+        ${pipelineHtml}
+    `;
+
+    addChatBubble(`Optimizado (${isImprove ? 'mejorar' : 'comprimir'}): ${msg.text}`, 'assistant');
+    isOptimizing = false;
+    document.getElementById('btn-optimize').disabled = false;
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// Main optimize handler
+// ---------------------------------------------------------------------------
+async function handleOptimize() {
+    const textarea = document.getElementById('prompt-textarea');
+    const text = textarea.value.trim();
+    if (!text) return;
+    if (isOptimizing) return;
+
+    isOptimizing = true;
+    document.getElementById('btn-optimize').disabled = true;
+
+    addChatBubble(text, 'user');
+
+    // Show loading state
+    const container = document.getElementById('results-content');
+    container.innerHTML = `
+        <div class="empty-state">
+            <div class="spinner"></div>
+            <div style="margin-top:8px;">Optimizando prompt…</div>
+        </div>
+    `;
+
+    // Check server availability first
+    const health = await checkServerHealth();
+    updateServerStatus(health.available, health.version);
+
+    if (!health.available) {
+        renderError('Servidor IAndes no disponible. Inicia el servidor con: python -m iandes_server');
+        return;
+    }
+
+    // Build and send optimization request
+    const requestId = crypto.randomUUID();
+    const estimatedTokens = estimateTokensLocal(text);
+
+    const msg = {
+        type: 'OPTIMIZE_PROMPT',
+        requestId,
+        text: text,
+        originalText: text,
+        classification: { profile: 'sandbox', layers: [1, 2, 3], signals: { wordCount: text.split(/\s+/).length } },
+        mode: currentMode,
+        provider: 'sandbox',
+    };
+
+    // This will be handled by handleBackgroundMessage
+    handleBackgroundMessage(msg);
+}
+
+// ---------------------------------------------------------------------------
+// Server status indicator
+// ---------------------------------------------------------------------------
+function updateServerStatus(available, version) {
+    const dot = document.getElementById('server-dot');
+    const label = document.getElementById('server-label');
+    if (available) {
+        dot.className = 'server-dot available';
+        label.textContent = version ? `Servidor v${version} ✓` : 'Servidor conectado ✓';
+        label.style.color = '#00e696';
+    } else {
+        dot.className = 'server-dot unavailable';
+        label.textContent = 'Servidor no disponible';
+        label.style.color = '#ff4d6d';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test cases
+// ---------------------------------------------------------------------------
+const TEST_CASES = [
+    {
+        label: 'Cortesía + pregunta',
+        text: 'Hola, me podrías ayudar haciendo un resumen de la segunda guerra mundial, teniendo en cuenta los principales detonantes?',
+    },
+    {
+        label: 'Cortesía + universidad',
+        text: 'Hola buenas noches, me ayudas con un trabajo de la universidad?',
+    },
+    {
+        label: 'Código con backticks',
+        text: '```python\ndef fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n```\n\nExplícame este código paso a paso de forma detallada y con ejemplos por favor',
+    },
+    {
+        label: 'Prompt corto',
+        text: 'Qué es Python?',
+    },
+    {
+        label: 'Preguntas múltiples',
+        text: '¿Cuáles son las causas de la Revolución Francesa? ¿Qué impacto tuvo en Europa? ¿Cómo influyó en la independencia de América Latina? ¿Podrías responder de forma detallada por favor?',
+    },
+    {
+        label: 'Servidor caído',
+        text: 'Hola, podrías ayudarme con algo?',
+        simulateServerError: true,
+    },
+    {
+        label: 'Comprimir vs Mejorar',
+        text: 'Hola, me podrías hacer un análisis detallado y exhaustivo de las causas económicas de la Primera Guerra Mundial, teniendo en cuenta todos los factores geopolíticos y sociales que influyeron en el conflicto, por favor?',
+    },
+];
+
+function loadTestCases() {
+    const row = document.getElementById('test-cases-row');
+    TEST_CASES.forEach((tc, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'test-case-btn';
+        btn.textContent = tc.label;
+        btn.onclick = () => {
+            document.getElementById('prompt-textarea').value = tc.text;
+            if (tc.simulateServerError) {
+                simulateServerError();
+            }
+        };
+        row.appendChild(btn);
+    });
+}
+
+function simulateServerError() {
+    // Temporarily override server check to simulate unavailable server
+    const originalSendToServer = window.sendToServer;
+    window.sendToServer = async function() {
+        return { ok: false, error: 'Servidor IAndes no disponible. Inicia el servidor para optimizar prompts.', errorCode: 'SERVER_UNAVAILABLE' };
+    };
+    // Restore after 30 seconds
+    setTimeout(() => {
+        window.sendToServer = originalSendToServer;
+    }, 30000);
+    addChatBubble('⚠ Simulación: servidor no disponible por 30s', 'system');
+}
+
+// ---------------------------------------------------------------------------
+// Initialize
+// ---------------------------------------------------------------------------
+async function init() {
+    loadTestCases();
+
+    // Load saved mode
+    chrome.storage.local.get(['mode'], (res) => {
+        if (res?.mode) {
+            setMode(res.mode);
+        }
+    });
+
+    // Check server status
+    const health = await checkServerHealth();
+    updateServerStatus(health.available, health.version);
+
+    // Periodic health check
+    setInterval(async () => {
+        const h = await checkServerHealth();
+        updateServerStatus(h.available, h.version);
+    }, 10000);
+}
+
+init();
+</script>
+
+</body>
+</html>

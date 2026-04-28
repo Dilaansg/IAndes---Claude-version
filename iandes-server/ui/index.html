@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IAndes Server — Panel de Control</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>IAndes Server v5.0</h1>
+            <p class="subtitle">Servidor local de procesamiento de prompts</p>
+        </header>
+
+        <section class="status-panel">
+            <h2>Estado del Servidor</h2>
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="status-label">Servidor</span>
+                    <span id="server-status" class="status-value checking">Verificando...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">spaCy</span>
+                    <span id="spacy-status" class="status-value checking">—</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">MiniLM</span>
+                    <span id="minilm-status" class="status-value checking">—</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Versión</span>
+                    <span id="version" class="status-value">5.0.0</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="actions-panel">
+            <button id="btn-warmup" class="btn btn-primary">Warmup Modelos</button>
+            <button id="btn-test" class="btn btn-secondary">Test Pipeline</button>
+        </section>
+
+        <section class="log-panel">
+            <h2>Log de Requests</h2>
+            <div id="request-log" class="log-container">
+                <p class="log-empty">Sin requests aún</p>
+            </div>
+        </section>
+
+        <section class="config-panel">
+            <h2>Configuración</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label for="config-port">Puerto</label>
+                    <input id="config-port" type="number" value="8000" min="1024" max="65535">
+                </div>
+                <div class="config-item">
+                    <label for="config-quality-floor">Quality Floor</label>
+                    <input id="config-quality-floor" type="number" value="0.85" min="0" max="1" step="0.05">
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

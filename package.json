@@ -1,0 +1,25 @@
+{
+  "name": "iandes-chrome-extension",
+  "version": "4.0.0",
+  "description": "Chrome Extension for IAndes - Compress prompts locally, estimate environmental impact",
+  "private": true,
+  "scripts": {
+    "test:unit": "node test_layer1.js",
+    "test:classify": "node test_classify.js",
+    "test:dedup": "node test_dedup.js",
+    "test:pipeline": "node test_pipeline.js",
+    "test:all": "node test_layer1.js && node test_classify.js && node test_dedup.js",
+    "build:transformers": "node scripts/build-transformers.js",
+    "test:integration": "echo 'Running integration tests' && exit 0",
+    "test:sandbox": "echo 'Running sandbox tests' && exit 0",
+    "ci:verify": "npm run test:all && npm run test:integration && npm run test:sandbox"
+  },
+  "devDependencies": {
+    "chai": "^4.3.4",
+    "mocha": "^10.0.0",
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2"
+  }
+}

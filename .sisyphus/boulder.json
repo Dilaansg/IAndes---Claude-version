@@ -1,0 +1,41 @@
+{
+  "active_plan": "C:\\Users\\dosor\\IAndes\\.sisyphus\\plans\\plan-estabilizacion-critico-alto-iandes.md",
+  "started_at": "2026-04-25T19:56:11.639Z",
+  "session_ids": [
+    "ses_23a55f9cdffeZx6tEAI6t0eaFg"
+  ],
+  "session_origins": {
+    "ses_23a55f9cdffeZx6tEAI6t0eaFg": "direct"
+  },
+  "plan_name": "plan-estabilizacion-critico-alto-iandes",
+  "agent": "atlas",
+  "task_sessions": {
+    "todo:6": {
+      "task_key": "todo:6",
+      "task_label": "6",
+      "task_title": "Centralizar configuración crítica (timeouts, thresholds, retries, flags de degradación)",
+      "session_id": "ses_2395c63b8ffe5XK9pCZM488lZ4",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-04-25T21:55:09.677Z"
+    },
+    "todo:7": {
+      "task_key": "todo:7",
+      "task_label": "7",
+      "task_title": "Endurecer pipeline ONNX: adaptación dinámica de I/O names y shape guards",
+      "session_id": "ses_2393ec8b0ffead8Hauqv6QARK2",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-04-25T22:29:54.503Z"
+    },
+    "todo:8": {
+      "task_key": "todo:8",
+      "task_label": "8",
+      "task_title": "Endurecer descarga/caché ONNX y diagnóstico de disponibilidad runtime",
+      "session_id": "ses_23939a782ffeL0u8K9KFwzVc2D",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-04-25T22:33:03.040Z"
+    }
+  }
+}

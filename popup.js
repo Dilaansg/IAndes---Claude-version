@@ -1,17 +1,17 @@
-﻿// [FIX-CSP] Script extraido desde popup.html para cumplir CSP en MV3.
+﻿// popup.js — IAndes v5.0
 // =============================================================================
 // LÓGICA DEL POPUP
+// =============================================================================
+// v5: Ya no verifica Ollama/ONNX. Verifica el servidor local IAndes.
 // =============================================================================
 
 /**
  * Estado del popup.
- * Se inicializa con los valores guardados en chrome.storage.
+ * [BUG-04] currentMode ya no es fuente primaria - storage es la única fuente de verdad.
  */
-let currentMode = "compress";
 const compressBtn = document.getElementById("btn-compress");
 const improveBtn = document.getElementById("btn-improve");
 const improveCard = document.getElementById("improve-card");
-let recommendedOllamaModel = "qwen3.5:2b";
 
 // ---------------------------------------------------------------------------
 // Selector de modo
@@ -21,7 +21,6 @@ compressBtn?.addEventListener("click", () => setMode("compress"));
 improveBtn?.addEventListener("click", () => setMode("improve"));
 
 function setMode(mode) {
-    currentMode = mode;
     compressBtn?.classList.toggle("active", mode === "compress");
     improveBtn?.classList.toggle("active", mode === "improve");
     if (improveBtn) {
@@ -29,7 +28,7 @@ function setMode(mode) {
     }
     improveCard?.classList.toggle("hidden", mode !== "improve");
 
-    // Persistir en popup para evitar perder estado si el SW está dormido.
+    // Persistir en storage (única fuente de verdad)
     chrome.storage.local.set({ mode });
 
     // Notificar al Service Worker del cambio de modo
@@ -45,13 +44,36 @@ chrome.storage.local.get("mode", ({ mode }) => {
 });
 
 // ---------------------------------------------------------------------------
-// Copiar el comando de Ollama
+// Toggle ON/OFF de la extensión
+// ---------------------------------------------------------------------------
+const extToggle = document.getElementById("ext-toggle");
+const extToggleTrack = document.getElementById("ext-toggle-track");
+
+// Cargar estado guardado
+chrome.storage.local.get(["extensionEnabled"], ({ extensionEnabled }) => {
+    if (extToggle) extToggle.checked = extensionEnabled !== false;
+    if (extToggleTrack) extToggleTrack.style.background = extensionEnabled === false ? "#555" : "#00e696";
+});
+
+// Escuchar cambios del toggle
+extToggle?.addEventListener("change", (e) => {
+    const enabled = e.target.checked;
+    chrome.storage.local.set({ extensionEnabled: enabled });
+    if (extToggleTrack) extToggleTrack.style.background = enabled ? "#00e696" : "#555";
+    // Notificar al content script en la pestaña activa
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "SET_ENABLED", enabled });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Copiar el comando de inicio del servidor
 // ---------------------------------------------------------------------------
 
 document.getElementById("copy-cmd")?.addEventListener("click", async () => {
     const copyHint = document.getElementById("copy-hint");
     try {
-        await navigator.clipboard.writeText(`ollama pull ${recommendedOllamaModel}`);
+        await navigator.clipboard.writeText("python -m iandes-server");
         if (copyHint) {
             copyHint.textContent = "✓ Copiado";
             setTimeout(() => {
@@ -104,7 +126,6 @@ async function refreshMetrics() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;
 
-    // Pedir las métricas al Content Script que está corriendo en esa pestaña
     chrome.tabs.sendMessage(tab.id, { type: "GET_METRICS" }, (data) => {
         if (chrome.runtime.lastError || !data) return;
 
@@ -115,10 +136,10 @@ async function refreshMetrics() {
         if (data.water_ml != null && waterEl) waterEl.textContent = data.water_ml + " ml";
         if (data.co2_g != null && co2El) co2El.textContent = data.co2_g + " g";
 
-        // Mostrar la fuente del conteo (tiktoken, API de Anthropic, etc.)
+        // Mostrar la fuente del conteo (v5: siempre estimación local)
         const sourceEl = document.getElementById("val-source");
-        const sourceText = data.source || "–";
-        const providerText = data.provider ? ` (${data.provider})` : "";
+        const sourceText = data.source === "local_estimate" ? "Estimación local (±15%)" : (data.source || "Estimación local");
+        const providerText = data.provider ? ` · ${data.provider}` : "";
         if (sourceEl) {
             sourceEl.textContent = `${sourceText}${providerText}`;
         }
@@ -153,82 +174,56 @@ function refreshSessionSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Verificar el estado del sistema (desde el Service Worker)
+// Verificar el estado del servidor local IAndes (v5)
 // ---------------------------------------------------------------------------
 
 async function refreshSystemStatus() {
-    // El proyecto actual usa estimaciones locales; no requiere servidor Python.
-    const dotServer = document.getElementById("dot-server");
-    const labelServer = document.getElementById("label-server");
-    if (dotServer) dotServer.className = "dot ok";
-    if (labelServer) labelServer.textContent = "Métricas locales activas (sin servidor)";
-
-    // Verificar Ollama y modelo ONNX desde el Service Worker
+    // v5: Verificar estado del servidor local vía Service Worker
     chrome.runtime.sendMessage({ type: "GET_STATUS" }, (status) => {
-        if (chrome.runtime.lastError || !status) return;
-        recommendedOllamaModel = status.recommendedModel || "qwen3.5:2b";
-
-        const commandLabel = document.querySelector("#copy-cmd span:first-child");
-        if (commandLabel) {
-            commandLabel.textContent = `ollama pull ${recommendedOllamaModel}`;
+        if (chrome.runtime.lastError || !status) {
+            // No se pudo comunicar con el Service Worker
+            const dotServer = document.getElementById("dot-server");
+            const labelServer = document.getElementById("label-server");
+            if (dotServer) dotServer.className = "dot error";
+            if (labelServer) labelServer.textContent = "Error de conexión";
+            return;
         }
 
-        // ONNX
-        const dotOnnx  = document.getElementById("dot-onnx");
-        const lblOnnx  = document.getElementById("label-onnx");
-        if (!dotOnnx || !lblOnnx) return;
+        const dotServer = document.getElementById("dot-server");
+        const labelServer = document.getElementById("label-server");
+        const dotModels = document.getElementById("dot-models");
+        const labelModels = document.getElementById("label-models");
+        const banner = document.getElementById("banner-server");
 
-        if (!status.onnxRuntimeAvailable) {
-            dotOnnx.className  = "dot error";
-            lblOnnx.textContent = "ONNX Runtime no disponible (falta lib/ort.min.js)";
-        } else if (status.onnxCached) {
-            dotOnnx.className  = "dot ok";
-            lblOnnx.textContent = "Modelo ONNX en caché ✓";
-        } else {
-            dotOnnx.className  = "dot warn";
-            lblOnnx.textContent = "Modelo ONNX no descargado";
-        }
-
-        // Ollama
-        const dotOllama = document.getElementById("dot-ollama");
-        const lblOllama = document.getElementById("label-ollama");
-        const banner    = document.getElementById("banner-ollama");
-        if (!dotOllama || !lblOllama || !banner) return;
-        const sameAsRecommended = (status.ollamaModel || "").toLowerCase() === recommendedOllamaModel.toLowerCase();
-
-        if (status.ollamaAvailable && status.ollamaModel) {
-            dotOllama.className  = "dot ok";
-            lblOllama.textContent = sameAsRecommended
-                ? `Ollama: ${status.ollamaModel} ✓`
-                : `Ollama: ${status.ollamaModel} ✓ · recomendado: ${recommendedOllamaModel}`;
-
-            // Si hay modelo pero no es el recomendado, mostrar guía opcional.
-            if (!sameAsRecommended) {
-                const bannerTitleEl = document.querySelector("#banner-ollama .banner-title");
-                const bannerTextEl = document.querySelector("#banner-ollama .banner-text");
-                if (bannerTitleEl) bannerTitleEl.textContent = "Modelo alternativo detectado";
-                if (bannerTextEl) {
-                    bannerTextEl.textContent =
-                        `Tu modelo ${status.ollamaModel} funciona. Recomendado para la mayoría de usuarios: ${recommendedOllamaModel}.`;
-                }
-                banner.classList.add("visible");
-            } else {
-                banner.classList.remove("visible");
+        // Servidor disponible
+        if (status.serverAvailable) {
+            if (dotServer) dotServer.className = "dot ok";
+            if (labelServer) {
+                const version = status.serverVersion ? ` v${status.serverVersion}` : "";
+                labelServer.textContent = `Servidor IAndes${version} ✓`;
             }
+
+            // Modelos cargados
+            if (status.modelsLoaded) {
+                if (dotModels) dotModels.className = "dot ok";
+                if (labelModels) labelModels.textContent = "Modelos cargados ✓";
+            } else {
+                if (dotModels) dotModels.className = "dot warn";
+                if (labelModels) labelModels.textContent = "Cargando modelos…";
+            }
+
+            // Ocultar banner si el servidor está disponible
+            if (banner) banner.classList.remove("visible");
         } else {
-            dotOllama.className  = "dot warn";
-            lblOllama.textContent = "Ollama no detectado";
-                    const bannerTitleEl = document.querySelector("#banner-ollama .banner-title");
-                    const bannerTextEl = document.querySelector("#banner-ollama .banner-text");
-                    if (bannerTitleEl) {
-                        bannerTitleEl.textContent = currentMode === "improve" ? "Modo Mejorar requiere Ollama" : "Modo básico activo";
-                    }
-                    if (bannerTextEl) {
-                        bannerTextEl.textContent = currentMode === "improve"
-                            ? `Para reescribir prompts con rol, contexto y formato de salida claros, instala Ollama y descarga ${recommendedOllamaModel}:`
-                            : `Para activar la compresión avanzada (Capa 3), instala Ollama y descarga ${recommendedOllamaModel}:`;
-                    }
-            banner.classList.add("visible");     // Mostrar el banner con instrucciones
+            // Servidor no disponible
+            if (dotServer) dotServer.className = "dot error";
+            if (labelServer) labelServer.textContent = "Servidor no disponible";
+
+            if (dotModels) dotModels.className = "dot loading";
+            if (labelModels) labelModels.textContent = "Requiere servidor";
+
+            // Mostrar banner con instrucciones
+            if (banner) banner.classList.add("visible");
         }
     });
 }
@@ -247,4 +242,3 @@ refreshSessionSummary();
 setInterval(refreshMetrics, 2000);
 setInterval(refreshSystemStatus, 5000);
 setInterval(refreshSessionSummary, 2000);
-

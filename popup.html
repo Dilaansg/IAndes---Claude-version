@@ -1,7 +1,7 @@
 ﻿<!DOCTYPE html>
 <!--
   =============================================================================
-  IAndes – Popup de la extensión v3.0
+  IAndes – Popup de la extensión v5.0
   =============================================================================
 
   ¿Qué es este archivo?
@@ -12,13 +12,13 @@
       1. En qué chat estás (ChatGPT, Claude, Gemini)
       2. Las métricas del último prompt analizado
          (tokens, agua, CO2)
-      3. Estado del sistema (¿tiktoken disponible? ¿Ollama corriendo?)
-      4. Resumen de la sesión (tokens ahorrados)
-      5. Banner con instrucciones si Ollama no está disponible
+      3. Estado del servidor local IAndes
+      4. Resumen de la sesión (tokens ahorrados, CO2, agua)
+      5. Banner con instrucciones si el servidor no está disponible
 
   ¿Cómo funciona?
     1. Al abrirse, llama al Service Worker (background.js) para conocer
-       el estado del sistema (Ollama, ONNX).
+       el estado del servidor local IAndes.
     2. También consulta al Content Script (content.js) para obtener las
        métricas del prompt actual en la pestaña activa.
     3. Refresca las métricas cada 2 segundos.
@@ -141,14 +141,14 @@
   .dot.loading { background: var(--muted); animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
-  /* ---- Banner de instalación de Ollama ---- */
+  /* ---- Banner de servidor no disponible ---- */
   .banner {
     background: rgba(255,179,71,0.08);
     border: 1px solid rgba(255,179,71,0.3);
     border-radius: var(--radius);
     padding: 10px 12px;
     margin-bottom: 8px;
-    display: none;   /* Oculto por defecto, se muestra si Ollama no está */
+    display: none;   /* Oculto por defecto, se muestra si el servidor no está */
   }
   .banner.visible  { display: block; }
   .banner-title    { color: var(--warning); font-weight: 700; font-size: 11px; margin-bottom: 4px; }
@@ -187,7 +187,7 @@
 <div class="header">
   <div>
     <div class="logo">IAndes</div>
-    <div class="version">v3.0 · Extensión de Chrome</div>
+    <div class="version">v5.0 · Servidor local</div>
   </div>
 </div>
 
@@ -203,6 +203,15 @@
   <button class="mode-btn"        id="btn-improve" >✦ Mejorar</button>
 </div>
 
+<!-- Toggle ON/OFF para la extensión -->
+<div class="toggle-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:6px 10px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.06);">
+  <span style="font-size:11px;color:var(--muted);">IAndes activo</span>
+  <label class="switch" style="position:relative;display:inline-block;width:36px;height:18px;cursor:pointer;">
+    <input type="checkbox" id="ext-toggle" checked style="opacity:0;width:0;height:0;">
+    <span id="ext-toggle-track" style="position:absolute;top:0;left:0;right:0;bottom:0;background:#00e696;border-radius:9px;transition:.3s;"></span>
+  </label>
+</div>
+
 <!-- [FASE 4] Tarjeta extra para el modo Mejorar -->
 <div class="card hidden" id="improve-card">
   <div class="card-title">Modo Mejorar</div>
@@ -211,7 +220,7 @@
 
 <!-- Tarjeta: métricas del prompt actual -->
 <div class="card">
-  <div class="card-title">Prompt actual</div>
+  <div class="card-title">Prompt actual <span style="font-size:8px;color:#6b8a78;font-weight:400;text-transform:none;letter-spacing:0;">(estimación local)</span></div>
   <div class="metric-row">
     <span class="metric-label">🔢 Tokens</span>
     <span class="metric-value accent" id="val-tokens">–</span>
@@ -228,40 +237,34 @@
     <span class="metric-label" style="font-size:9px;opacity:0.6;">Fuente</span>
     <span style="font-size:9px;opacity:0.5;" id="val-source">–</span>
   </div>
+  <div style="font-size:8px;color:#6b8a78;margin-top:4px;font-style:italic;">Valores exactos tras optimizar con servidor</div>
 </div>
 
-<!-- Tarjeta: estado del sistema -->
+<!-- Tarjeta: estado del servidor local -->
 <div class="card">
-  <div class="card-title">Sistema</div>
-  <div class="status-row">
-    <div class="dot loading" id="dot-onnx"></div>
-    <span id="label-onnx">Verificando modelo ONNX…</span>
-  </div>
-  <div class="status-row">
-    <div class="dot loading" id="dot-ollama"></div>
-    <span id="label-ollama">Verificando Ollama…</span>
-  </div>
+  <div class="card-title">Servidor local</div>
   <div class="status-row">
     <div class="dot loading" id="dot-server"></div>
-    <span id="label-server">Verificando servidor local…</span>
+    <span id="label-server">Verificando servidor IAndes…</span>
+  </div>
+  <div class="status-row">
+    <div class="dot loading" id="dot-models"></div>
+    <span id="label-models">Verificando modelos…</span>
   </div>
 </div>
 
-<!-- Banner: instrucciones para instalar Ollama (solo visible si no está disponible) -->
-<div class="banner" id="banner-ollama">
-  <div class="banner-title">Modo básico activo</div>
+<!-- Banner: instrucciones si el servidor no está disponible -->
+<div class="banner" id="banner-server">
+  <div class="banner-title">Servidor no disponible</div>
   <div class="banner-text">
-    Para activar la compresión avanzada (Capa 3), instala Ollama y descarga el modelo recomendado:
+    Para optimizar prompts, inicia el servidor IAndes:
   </div>
   <div class="banner-cmd" id="copy-cmd">
-    <span>ollama pull qwen3.5:2b</span>
+    <span>python -m iandes-server</span>
     <span class="copy-hint" id="copy-hint">📋 Copiar</span>
   </div>
   <div class="banner-text" style="margin-top:2px;">
-    <a id="link-ollama" href="https://ollama.com" target="_blank"
-       style="color:var(--warning);text-decoration:none;">
-      ¿Cómo instalar Ollama? →
-    </a>
+    El servidor procesa todo localmente — sin datos enviados a la nube.
   </div>
 </div>
 
@@ -278,7 +281,7 @@
   <div class="progress-label" id="session-label">0% de reducción promedio</div>
 </div>
 
-<div class="footer">Todo el procesamiento es local · Sin telemetría</div>
+<div class="footer">Procesamiento local vía servidor · Sin telemetría</div>
 
 <!-- [FIX-CSP] Script externo para cumplir CSP de MV3 (sin inline script) -->
 <script src="popup.js"></script>

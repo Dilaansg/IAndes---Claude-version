@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+lib/transformers.min.js
+
+# Python
+iandes-server/__pycache__/
+iandes-server/*.egg-info/
+iandes-server/.venv/
+iandes-server/venv/
+iandes-server/dist/
+iandes-server/build/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenCode
+.opencode/
+.tmp/
+
+# Logs
+*.log
+sandbox/logs/
+
+.sisyphus/
+.agents/

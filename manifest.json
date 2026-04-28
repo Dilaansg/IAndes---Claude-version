@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "IAndes",
-  "version": "3.0",
-  "description": "Reduce la huella hídrica y de carbono de tus chats con IA. Comprime y mejora prompts localmente.",
+  "version": "5.0",
+  "description": "Reduce la huella hídrica y de carbono de tus chats con IA. Comprime y mejora prompts localmente con servidor Python.",
 
   "permissions": [
     "activeTab",
@@ -15,9 +15,7 @@
     "*://chatgpt.com/*",
     "*://claude.ai/*",
     "*://gemini.google.com/*",
-    "https://huggingface.co/*",
-    "http://localhost:11434/*",
-    "http://127.0.0.1:11434/*"
+    "http://localhost:8000/*"
   ],
 
   "background": {
@@ -32,24 +30,28 @@
         "*://claude.ai/*",
         "*://gemini.google.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "error_utils.js",
+        "config.js",
+        "token_utils.js",
+        "content-provider.js",
+        "content-state.js",
+        "content-metrics.js",
+        "content-pipeline.js",
+        "content-overlay.js",
+        "content-panels.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "IAndes – Comprime tu prompt"
+    "default_title": "IAndes v5 – Comprime tu prompt"
   },
 
-  "web_accessible_resources": [
-    {
-      "resources": ["lib/ort.min.js","token_worker.js"],
-      "matches":   ["<all_urls>"]
-    }
-  ],
-
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }

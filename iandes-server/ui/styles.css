@@ -1,0 +1,252 @@
+/* IAndes Server UI — Styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+header h1 {
+    font-size: 1.8rem;
+    color: #58a6ff;
+    margin-bottom: 0.25rem;
+}
+
+.subtitle {
+    color: #8b949e;
+    font-size: 0.9rem;
+}
+
+/* Status Panel */
+.status-panel {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.status-panel h2 {
+    font-size: 1rem;
+    color: #8b949e;
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: #0d1117;
+    border-radius: 6px;
+}
+
+.status-label {
+    color: #8b949e;
+    font-size: 0.85rem;
+}
+
+.status-value {
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.status-value.ready {
+    color: #3fb950;
+}
+
+.status-value.error {
+    color: #f85149;
+}
+
+.status-value.checking {
+    color: #d29922;
+}
+
+/* Actions */
+.actions-panel {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.btn {
+    flex: 1;
+    padding: 0.65rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.btn-primary {
+    background: #238636;
+    color: #fff;
+}
+
+.btn-primary:hover {
+    background: #2ea043;
+}
+
+.btn-secondary {
+    background: #30363d;
+    color: #c9d1d9;
+}
+
+.btn-secondary:hover {
+    background: #484f58;
+}
+
+/* Log Panel */
+.log-panel {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.log-panel h2 {
+    font-size: 1rem;
+    color: #8b949e;
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.log-container {
+    background: #0d1117;
+    border-radius: 6px;
+    padding: 0.75rem;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.8rem;
+}
+
+.log-empty {
+    color: #484f58;
+    text-align: center;
+}
+
+.log-entry {
+    padding: 0.35rem 0;
+    border-bottom: 1px solid #21262d;
+}
+
+.log-entry:last-child {
+    border-bottom: none;
+}
+
+.log-time {
+    color: #8b949e;
+    margin-right: 0.5rem;
+}
+
+.log-method {
+    font-weight: 600;
+    margin-right: 0.5rem;
+}
+
+.log-method.POST {
+    color: #3fb950;
+}
+
+.log-method.GET {
+    color: #58a6ff;
+}
+
+.log-path {
+    color: #c9d1d9;
+}
+
+.log-status {
+    margin-left: 0.5rem;
+}
+
+.log-status.s200 {
+    color: #3fb950;
+}
+
+.log-status.s4xx {
+    color: #d29922;
+}
+
+.log-status.s5xx {
+    color: #f85149;
+}
+
+.log-ms {
+    color: #8b949e;
+    margin-left: 0.5rem;
+}
+
+/* Config Panel */
+.config-panel {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1.25rem;
+}
+
+.config-panel h2 {
+    font-size: 1rem;
+    color: #8b949e;
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+}
+
+.config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.config-item label {
+    color: #8b949e;
+    font-size: 0.8rem;
+}
+
+.config-item input {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 0.5rem;
+    color: #c9d1d9;
+    font-size: 0.85rem;
+}
